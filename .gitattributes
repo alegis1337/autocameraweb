@@ -1,0 +1,15 @@
+# Проект живёт на Windows, но в репозитории держим LF — иначе каждый
+# перенос между машинами показывал бы «изменён весь файл».
+* text=auto eol=lf
+
+# PowerShell и cmd читаются нативными интерпретаторами Windows: этим файлам
+# нужны CRLF, иначе PS 5.1 спотыкается на here-string'ах, а .bat — на метках.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.vbs  text eol=crlf
+
+# Бинарники — не трогать и не пытаться сливать.
+*.docx binary
+*.jpg  binary
+*.png  binary
+*.db   binary

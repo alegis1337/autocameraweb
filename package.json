@@ -1,0 +1,31 @@
+{
+  "name": "autocamera",
+  "version": "3.5.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Детерминированный мониторинг камер видеонаблюдения: Hikvision/HiWatch ISAPI, RTSP, SMB, TRASSIR SDK; статистика неисправностей и контроль качества изображения; Playwright — только для личного кабинета оператора связи",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "node src/index.js --dry-run",
+    "test-email": "node src/index.js --test-email",
+    "test-cam": "node src/index.js --dry-run --only",
+    "test": "node --test",
+    "web": "node --disable-warning=ExperimentalWarning server/app.js",
+    "add-user": "node --disable-warning=ExperimentalWarning server/add-user.js",
+    "build-points": "node tools/build-points.js",
+    "backfill": "node --disable-warning=ExperimentalWarning tools/backfill-timeline.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "nodemailer": "^6.9.0",
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alegis1337/autocameraweb.git"
+  }
+}

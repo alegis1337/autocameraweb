@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Мониторинг видеонаблюдения — карта</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <div class="topbar">
+      <span class="title">Мониторинг видеонаблюдения</span>
+      <div class="stats">
+        <span><span class="dot ok"></span>Работают: <b id="cnt-ok">—</b></span>
+        <span><span class="dot down"></span>Не работают: <b id="cnt-down">—</b></span>
+        <span><span class="dot unknown"></span>Нет данных: <b id="cnt-unknown">—</b></span>
+      </div>
+      <!-- Фильтр по объектам: кнопки строит app.js по данным /api/status,
+           порядок — как в WEB_MAP_SYSTEMS. -->
+      <!-- Этажи (список камер второго этажа — WEB_FLOOR2_CAMERAS) — выпадающим списком
+           под кнопкой объекта: список висит поверх карты и высоту шапки не
+           меняет, поэтому интерфейс не «прыгает». -->
+      <div class="objbar" id="objects" role="group" aria-label="Объект" hidden></div>
+
+      <span class="spacer"></span>
+      <!-- ВРЕМЕННЫЙ РЕДАКТОР: кнопка видна только админу (показывает app.js) -->
+      <button type="button" id="edit-toggle" class="edit-btn" hidden>Режим редактора</button>
+      <span class="updated" id="updated">загрузка…</span>
+      <form method="post" action="/logout"><button class="logout" type="submit">Выйти</button></form>
+    </div>
+
+    <!-- ВРЕМЕННЫЙ РЕДАКТОР: подсказка при включённом режиме -->
+    <div class="edit-hint" id="edit-hint" hidden></div>
+
+    <div class="content">
+      <div id="map"></div>
+      <aside id="sidebar" aria-label="Список камер">
+        <div class="sb-head" id="sb-head">Камеры <span id="sb-count"></span></div>
+        <div class="sb-list" id="sb-list"></div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Публичный конфиг (ключ Yandex, центр/зум, объект) сервер инжектит сюда -->
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

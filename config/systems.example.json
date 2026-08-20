@@ -1,0 +1,152 @@
+[
+  {
+    "_комментарий": "Образец config/systems.json. Скопируйте в config/systems.json и опишите свои объекты. Сам systems.json в git не публикуется: имена объектов и камер — данные заказчика. Секретов здесь быть не должно: хосты подставляются из .env через ${VAR}, логины и пароли — только ссылками на имена переменных (поля *Env).",
+    "id": "site-1",
+    "name": "Объект 1 (TRASSIR)",
+    "group": "Группа A",
+    "type": "trassir-sdk",
+    "enabled": true,
+    "host": "${SITE1_HOST}",
+    "port": 8080,
+    "userEnv": "SITE1_USER",
+    "passEnv": "SITE1_PASS",
+    "displayMode": "grid",
+    "gridColumns": 4,
+    "knownOffline": ["Имя камеры, которая заведомо не используется"],
+    "helpdeskIgnore": ["Имя камеры, о которой не писать в helpdesk"]
+  },
+  {
+    "id": "site-2",
+    "name": "Объект 2 (NVR по RTSP)",
+    "group": "Группа A",
+    "type": "ipanda-rtsp",
+    "enabled": true,
+    "displayMode": "grid",
+    "gridColumns": 4,
+    "nvrIp": "${SITE2_NVR_IP}",
+    "rtspUserEnv": "SITE2_RTSP_USER",
+    "rtspPassEnv": "SITE2_RTSP_PASS",
+    "viaNvr": true,
+    "unusedChannels": [15, 16],
+    "cameras": [
+      { "index": 0, "name": "CH1", "viaNvr": true, "nvrChannel": 1, "rtspPath": "/ch01/0" },
+      { "index": 1, "name": "CH2", "viaNvr": true, "nvrChannel": 2, "rtspPath": "/ch02/0" }
+    ]
+  },
+  {
+    "id": "site-3",
+    "name": "Объект 3 (Hikvision/HiWatch ISAPI)",
+    "group": "Группа A",
+    "type": "hiwatch",
+    "enabled": true,
+    "displayMode": "grid",
+    "gridColumns": 4,
+    "urlEnv": "SITE3_URL",
+    "userEnv": "SITE3_USER",
+    "passEnv": "SITE3_PASS",
+    "loginRequired": true,
+    "maxChannelId": 16,
+    "unusedChannels": [13, 14, 15, 16],
+    "extraCameras": [
+      {
+        "_комментарий": "Камера другого типа, прицепленная к этой системе: в отчёте попадает в общую сетку объекта. Подробности — в README, раздел про extraCameras.",
+        "type": "tplink-tapo",
+        "name": "Wi-Fi камера",
+        "host": "${SITE3_TAPO_HOST}",
+        "rtspPath": "/stream1",
+        "rtspUserEnv": "TAPO_RTSP_USER",
+        "rtspPassEnv": "TAPO_RTSP_PASS"
+      }
+    ]
+  },
+  {
+    "id": "site-4",
+    "name": "Объект 4 (записи на SMB-шаре)",
+    "group": "Группа A",
+    "type": "smb-recordings",
+    "enabled": true,
+    "displayMode": "grid",
+    "gridColumns": 3,
+    "host": "${SITE4_SMB_HOST}",
+    "shareName": "Video",
+    "basePath": "",
+    "smbUserEnv": "SITE4_SMB_USER",
+    "smbPassEnv": "SITE4_SMB_PASS",
+    "freshnessMin": 60,
+    "channels": [
+      {
+        "_комментарий": "snapshotFrom — взять кадр у камеры другой системы: у SMB-канала своих кадров нет, а физически это может быть та же камера.",
+        "index": 0,
+        "name": "Канал 1",
+        "folder": "1",
+        "snapshotFrom": { "system": "site-3", "camIndex": 0, "camName": "Camera 01" }
+      }
+    ],
+    "qualityCheck": {
+      "_комментарий": "Ловит битые записи: обрыв RTSP оставляет на шаре файл в десятки байт.",
+      "sampleSize": 20,
+      "minFileSizeKb": 100,
+      "maxBadRatio": 0.3,
+      "freshnessMin": 60
+    }
+  },
+  {
+    "id": "site-5",
+    "name": "Объект 5 (свежесть файлов на шаре)",
+    "group": "Группа B",
+    "type": "beward-smb",
+    "enabled": true,
+    "displayMode": "list",
+    "gridColumns": 2,
+    "host": "${SITE5_SMB_HOST}",
+    "shareName": "Records",
+    "smbUserEnv": "SITE5_SMB_USER",
+    "smbPassEnv": "SITE5_SMB_PASS",
+    "freshnessMin": 90,
+    "cameras": [
+      { "index": 0, "name": "Камера 1", "ip": "${SITE5_CAM1_IP}", "port": 5050 }
+    ]
+  },
+  {
+    "id": "site-6",
+    "name": "Объект 6 (одиночные ISAPI-камеры)",
+    "group": "Группа B",
+    "type": "hikvision-multi",
+    "enabled": true,
+    "displayMode": "list",
+    "gridColumns": 2,
+    "cameras": [
+      {
+        "index": 0,
+        "name": "Камера 1",
+        "host": "${SITE6_CAM1_HOST}",
+        "port": 85,
+        "userEnv": "SITE6_CAM1_USER",
+        "passEnv": "SITE6_CAM1_PASS"
+      }
+    ]
+  },
+  {
+    "id": "site-7",
+    "name": "Объект 7 (портал оператора связи)",
+    "group": "Группа B",
+    "type": "rt-portal",
+    "enabled": true,
+    "displayMode": "list",
+    "gridColumns": 2,
+    "portalUrlEnv": "PORTAL_URL",
+    "userEnv": "PORTAL_USER",
+    "passEnv": "PORTAL_PASS",
+    "portalRetries": 2,
+    "excludeApiNames": ["Имя камеры в личном кабинете, которую не проверяем"],
+    "cameras": [
+      {
+        "_комментарий": "rtUid — идентификатор камеры в личном кабинете. Сопоставление идёт по нему: порядок выдачи API может поменяться, uid — нет.",
+        "index": 0,
+        "name": "Камера 1",
+        "ip": "${PORTAL_CAM1_IP}",
+        "rtUid": "${PORTAL_CAM1_UID}"
+      }
+    ]
+  }
+]

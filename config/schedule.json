@@ -1,0 +1,13 @@
+{
+  "comment": "Two-task scheduling for AutoCamera v2. 'light' runs every N minutes 24/7 (round-the-clock — cameras record and capture events at night too) — only status checks + timeline + live.html, no email/snapshots. 'daily' runs once a day at startTimeMSK — snapshots, email with day history, helpdesk.",
+  "light": {
+    "taskName": "AutoCamera Light",
+    "intervalMinutes": 15,
+    "startTimeMSK": "00:00",
+    "durationHours": 24
+  },
+  "daily": {
+    "taskName": "AutoCamera Daily",
+    "startTimeMSK": "07:00"
+  }
+}

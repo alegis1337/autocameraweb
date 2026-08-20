@@ -1,0 +1,293 @@
+/* Оформление карты видеонаблюдения (v3.2).
+   Тёмная тема: карту держат открытой на мониторе весь день, светлый фон
+   утомляет и хуже показывает цветные маркеры состояния. */
+
+:root {
+  --bg: #12171c;
+  --panel: #1a2027;
+  --panel-2: #212a33;
+  --line: #2c3742;
+  --text: #d7e0e8;
+  --muted: #8d9aa8;
+  --ok: #3fb950;
+  --issues: #d29922;
+  --down: #e5534b;
+  --unknown: #6e7d8c;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  /* Страница целиком занимает окно и сама НЕ прокручивается: прокрутка есть
+     только внутри списка камер. Без этого любой элемент, вылезший за окно
+     (например карта, не успевшая пересчитать свой размер), давал второй
+     скроллбар и уводил шапку вверх — список выглядел обрезанным. */
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+#app { display: flex; flex-direction: column; height: 100%; }
+
+/* ── Шапка ── */
+.topbar {
+  /* Выпадающий список этажей уходит из шапки вниз, поверх карты. Своя ступень
+     z-index нужна обоим: у Яндекс-карты внутри свои слои с большими номерами,
+     и без этого список оказался бы под картой. */
+  position: relative;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.topbar .title { font-weight: 600; font-size: 15px; white-space: nowrap; }
+.topbar .spacer { flex: 1; }
+.stats { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); }
+.stats b { color: var(--text); }
+.updated { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.updated .stale { color: var(--down); font-weight: 600; }
+
+.logout, .edit-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.logout:hover, .edit-btn:hover { background: var(--line); }
+/* РЕДАКТОР: активная кнопка режима расстановки */
+.edit-btn.active { background: #2f6f4f; border-color: #2f6f4f; color: #fff; }
+
+/* Сколько камер объекта не работает. Счётчики в шапке считают только видимые
+   камеры, поэтому поломка на невыбранном объекте иначе была бы не видна. */
+.down-badge {
+  display: inline-block;
+  min-width: 17px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--down);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.dot {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.dot.ok, .sb-dot.online { background: var(--ok); }
+.dot.issues, .sb-dot.no-recording { background: var(--issues); }
+.dot.down, .sb-dot.offline { background: var(--down); }
+.dot.unknown, .sb-dot.unknown { background: var(--unknown); }
+
+/* ── Фильтр по объектам (в шапке) ──
+   Отдельной строкой под шапкой не выносим: строка съедала высоту у карты ради
+   шести кнопок. В шапке они помещаются, а на узком экране переносятся вместе
+   с остальным её содержимым (у .topbar включён flex-wrap). */
+.objbar { display: flex; gap: 6px; flex-wrap: wrap; }
+.obj-btn {
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 4px 11px;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+.obj-btn:hover { background: var(--line); color: var(--text); }
+.obj-btn.active { background: #2b5d86; border-color: #2b5d86; color: #fff; }
+.obj-btn .obj-count { color: inherit; opacity: .65; margin-left: 5px; }
+.obj-btn .caret { margin-left: 6px; font-size: 10px; opacity: .8; }
+/* Выбранный этаж пишем на самой кнопке: список закрыт, а фильтр продолжает
+   работать — иначе «куда делись камеры» было бы загадкой. */
+.obj-btn .obj-floor { margin-left: 5px; font-size: 12px; opacity: .85; }
+
+/* ── Этажи: выпадающий список под кнопкой объекта ──
+   Именно выпадающий, а не ряд кнопок рядом: ряд добавлял шапке строку, карта
+   уменьшалась и весь интерфейс сдвигался. Список лежит absolute поверх карты —
+   высоту шапки не меняет вообще. */
+.obj-wrap { position: relative; display: inline-flex; }
+.obj-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 100%;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .45);
+}
+.floor-item {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.floor-item:hover { background: var(--panel-2); color: var(--text); }
+.floor-item.active { background: #2b5d86; color: #fff; }
+.floor-item .obj-count { color: inherit; opacity: .65; margin-left: 5px; }
+
+/* РЕДАКТОР: подсказка под шапкой при включённом режиме */
+.edit-hint {
+  padding: 8px 16px;
+  background: #23331f;
+  border-bottom: 1px solid var(--line);
+  color: #cfe6c2;
+  font-size: 13px;
+}
+
+/* ── Основная область: карта + список ── */
+.content { display: flex; flex: 1; min-height: 0; }
+
+/* position+z-index замыкают слои Яндекс-карты внутри блока карты: иначе её
+   внутренние z-index (сотни и тысячи) конкурировали бы с шапкой напрямую. */
+#map { flex: 1; min-width: 0; background: var(--panel-2); position: relative; z-index: 0; }
+.map-msg { padding: 24px; color: var(--muted); }
+
+#sidebar {
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+.sb-head {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  border-bottom: 1px solid var(--line);
+}
+.sb-head b, .sb-head span { color: var(--text); }
+.sb-list { overflow-y: auto; flex: 1; }
+.sb-empty { padding: 20px 12px; color: var(--muted); text-align: center; }
+
+/* Заголовок объекта в списке: камер несколько объектов, без разделителей они
+   слиплись бы в одну ленту. Липкий — при прокрутке видно, чей объект смотришь. */
+.sb-group-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.sb-group-name { flex: 1; color: var(--text); font-weight: 600; }
+.sb-group-count { color: var(--muted); text-transform: none; letter-spacing: 0; }
+.sb-group-count.has-down { color: var(--down); font-weight: 600; }
+
+.sb-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sb-row:hover { background: var(--panel-2); }
+.sb-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.sb-main { flex: 1; min-width: 0; }
+.sb-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-sub { display: block; color: var(--muted); font-size: 12px; }
+
+/* ── Балун камеры (белый попап Яндекса) ── */
+.card { color: #1b1b1b; min-width: 220px; max-width: 300px; }
+.card h3 { margin: 0 0 2px; font-size: 15px; }
+/* Объектов на карте несколько — подписываем, чья это камера. */
+.card .card-sys { color: #55606b; font-size: 12px; margin-bottom: 6px; }
+.card .card-line { margin-bottom: 4px; }
+.card .card-reason { color: #55606b; font-size: 12px; margin-bottom: 8px; }
+.card .badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #fff;
+}
+.badge.online { background: #2f9e41; }
+.badge.no-recording { background: #b8860b; }
+.badge.offline { background: #cf4038; }
+.badge.unknown { background: #7a8794; }
+.card .card-shot { width: 100%; border-radius: 6px; display: block; margin-top: 6px; }
+.card .card-noshot { color: #55606b; font-size: 12px; padding: 16px; text-align: center; background: #eef1f4; border-radius: 6px; margin-top: 6px; }
+
+/* ── Страница входа ── */
+.login-wrap { height: 100%; display: flex; align-items: center; justify-content: center; }
+.login-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 28px 30px;
+  width: min(360px, 92vw);
+}
+.login-card h1 { margin: 0 0 4px; font-size: 18px; }
+.login-card .sub { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+.login-card label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 13px; }
+.login-card input {
+  width: 100%;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+}
+.login-card button {
+  width: 100%;
+  padding: 9px;
+  background: #2f6f4f;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.login-card button:hover { background: #37835d; }
+.login-error { margin-top: 12px; color: var(--down); font-size: 13px; text-align: center; }
+
+/* ── Узкие экраны: телефон в пределах сети предприятия ── */
+@media (max-width: 900px) {
+  .content { flex-direction: column; }
+  /* Высота задана явно: карте нужен определённый размер родителя. */
+  #map { flex: none; height: 55vh; }
+  #sidebar { width: auto; border-left: none; border-top: 1px solid var(--line); flex: 1; min-height: 0; }
+  .stats { font-size: 13px; gap: 10px; }
+}
