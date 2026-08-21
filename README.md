@@ -1,8 +1,7 @@
 # AutoCamera Monitor
 
 Автоматическая проверка камер видеонаблюдения по расписанию с отправкой отчётов
-на email и заявок в helpdesk. Запускается на отдельной VM по расписанию Windows
-Task Scheduler — человек не нужен.
+на email и заявок в helpdesk. 
 
 **Версия 3.5** (этапы 0–2 из 4) · Windows 10/11 · Node.js ≥ 22.5 · ES modules
 
