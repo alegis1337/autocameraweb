@@ -14,7 +14,7 @@
  * Каждый локальный файл сохраняется как:
  *   screenshots/<runId>/<systemId>/<index>-<safeName>.jpg
  *
- * Удаление локальных файлов — забота вызывающего кода (после загрузки на Я.Диск).
+ * Удаление локальных файлов — забота вызывающего кода (после загрузки в Битрикс).
  */
 
 import fs from 'fs';
@@ -503,7 +503,7 @@ export async function captureSnapshot(runId, sys, cam) {
 
 /**
  * Параллельно снимает кадры для всех ONLINE камер. Не диагностирует, не
- * лезет в Я.Диск — только пишет JPEG в screenshots/<runId>/.
+ * лезет в Битрикс — только пишет JPEG в screenshots/<runId>/.
  *
  * @param {Array}  systemResults
  * @param {string} runId
@@ -571,7 +571,7 @@ export async function captureAll(systemResults, runId, options = {}) {
 }
 
 /**
- * Удаляет всю папку screenshots/<runId>/ после успешной заливки на Я.Диск.
+ * Удаляет всю папку screenshots/<runId>/ после успешной заливки в Битрикс.
  */
 export function cleanupRun(runId) {
   const dir = path.join(snapshotsRoot(), runId);

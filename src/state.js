@@ -6,7 +6,14 @@
  * и последнего наблюдения. По состоянию вычисляются три множества:
  *   newlyBroken — камеры, которые сломались впервые (или сменили причину);
  *   recovered   — камеры, которые были сломаны, теперь снова работают;
- *   stillBroken — лежат давно, в helpdesk о них больше не пишем.
+ *   stillBroken — лежат с прошлого прогона;
+ *   unchecked   — лежали, но их объект в этот прогон опросить не удалось
+ *                 (запись в state не меняется — см. CHECK_ERROR_STATUS).
+ *
+ * Механизм напоминаний (pickReminders / markNotified / notifiedAt) жил здесь
+ * до 04.09.2026 и снят вместе с переходом на ежедневное письмо в helpdesk:
+ * все сломанные камеры теперь и так перечисляются каждое утро. Код лежит
+ * в archive/helpdesk-reminders/ вместе с инструкцией, как его вернуть.
  *
  * Файл: state/helpdesk-state.json (gitignored).
  */
@@ -23,6 +30,15 @@ const STATE_FILE = path.join(STATE_DIR, 'helpdesk-state.json');
  * у нас уже есть и то и другое в объекте broken-camera.
  */
 export const cameraKey = (item) => `${item.systemId || item.system}|${item.camera}`;
+
+/**
+ * Статус записи «опрос объекта упал целиком» (её кладёт collectBrokenCameras
+ * вместо камер, когда чекер вернул ошибку, а не список). Живёт здесь, потому
+ * что именно diffAndUpdate обязан её распознать: камеры такого объекта в
+ * этот прогон не проверялись — ни сломанными, ни восстановленными их
+ * считать нельзя.
+ */
+export const CHECK_ERROR_STATUS = 'ошибка проверки';
 
 /**
  * Читает helpdesk-state. Если файла нет или он повреждён — возвращает
@@ -65,18 +81,29 @@ export function resetState() {
  * Сравнивает текущее множество сломанных камер с предыдущим state и
  * возвращает три категории. Мутирует state (lastRun + cameras).
  *
+ * Объект, чей опрос упал целиком (запись со статусом CHECK_ERROR_STATUS),
+ * своих камер в списке не имеет — но это не значит, что они заработали.
+ * Раньше они уходили в recovered, и назавтра камера, лежавшая неделю,
+ * попадала в письмо как «не работает с сегодня». Теперь их записи в
+ * state не трогаются вовсе: дата поломки переживает сбой опроса, а в
+ * `unchecked` возвращается, сколько таких камер осталось без ответа.
+ *
  * @param {object} state          — результат loadState()
  * @param {Array}  currentBroken  — массив объектов от collectBrokenCameras()
  *                                  (требует поле systemId, см. reporter.js)
- * @returns {{newlyBroken:Array, recovered:Array, stillBroken:Array}}
+ * @returns {{newlyBroken:Array, recovered:Array, stillBroken:Array, unchecked:Array}}
  */
 export function diffAndUpdate(state, currentBroken) {
   const now = new Date().toISOString();
   const currentKeys = new Set(currentBroken.map(cameraKey));
+  const uncheckedSystems = new Set(
+    currentBroken.filter((i) => i.status === CHECK_ERROR_STATUS).map((i) => i.systemId || i.system)
+  );
 
   const newlyBroken = [];
   const stillBroken = [];
   const recovered   = [];
+  const unchecked   = [];
 
   // 1. Идём по текущим сломанным
   for (const item of currentBroken) {
@@ -127,9 +154,10 @@ export function diffAndUpdate(state, currentBroken) {
       continue;
     }
 
-    // Та же поломка, что и в прошлом прогоне. Само по себе письмо она не
-    // вызывает, но может дойти до напоминания — см. pickReminders().
-    stillBroken.push({ ...item, _brokenSince: prev.since, _notifiedAt: prev.notifiedAt || prev.since });
+    // Та же поломка, что и в прошлом прогоне. Отдельным событием она не
+    // считается, но в ежедневное письмо в helpdesk попадает наравне с новыми:
+    // оператор должен видеть полную картину по объекту.
+    stillBroken.push({ ...item, _brokenSince: prev.since });
     state.cameras[key] = {
       ...prev,
       notes:    item.notes,
@@ -141,6 +169,12 @@ export function diffAndUpdate(state, currentBroken) {
   for (const [key, prev] of Object.entries(state.cameras)) {
     if (prev.status !== 'broken') continue;
     if (currentKeys.has(key)) continue;
+
+    // Объект не опрошен — про эту камеру в этот раз ничего не известно.
+    if (uncheckedSystems.has(prev.systemId || prev.system)) {
+      unchecked.push({ ...prev });
+      continue;
+    }
 
     recovered.push({
       systemId: prev.systemId,
@@ -162,59 +196,5 @@ export function diffAndUpdate(state, currentBroken) {
   }
 
   state.lastRun = now;
-  return { newlyBroken, recovered, stillBroken };
-}
-
-/**
- * Выбирает давно лежащие камеры, о которых пора напомнить.
- *
- * Зачем (17.08.2026). Письмо в helpdesk уходило только на НОВУЮ поломку, и
- * объект, лежащий вторые сутки, из письма исчезал совсем: 16.08 один из
- * объектов упал целиком, письмо ушло, 17.08 он всё ещё лежал — и по его группе
- * не пришло ничего. Теперь молчание ограничено по времени.
- *
- * Правило (решение пользователя от 18.08.2026):
- *   • объект, лежащий ЦЕЛИКОМ, — напоминаем каждое утро, пока не поднимут;
- *   • отдельная камера — раз в HELPDESK_RENOTIFY_DAYS дней.
- * Разница в том, что упавший объект — это ноль камер на площадке, и тут
- * ежедневное письмо оправдано; отдельная камера столько заявок в 1С не стоит.
- *
- * @param {Array} stillBroken — из diffAndUpdate (несёт `_notifiedAt`)
- * @param {object} opts
- * @param {Set}    opts.downSystems  — id объектов, упавших целиком
- * @param {number} opts.renotifyDays — сколько молчим по отдельной камере
- * @returns {Array} камеры, которые надо снова показать в письме
- */
-export function pickReminders(stillBroken, { downSystems = new Set(), renotifyDays = 3, now = new Date() } = {}) {
-  const nowMs = now.getTime();
-  const due = [];
-
-  for (const item of stillBroken) {
-    if (downSystems.has(item.systemId)) {
-      due.push({ ...item, _reminder: 'outage' });
-      continue;
-    }
-    const last = Date.parse(item._notifiedAt || item._brokenSince || '');
-    const days = Number.isFinite(last) ? (nowMs - last) / 86400_000 : Infinity;
-    if (days >= renotifyDays) due.push({ ...item, _reminder: 'renotify', _daysSilent: Math.floor(days) });
-  }
-
-  return due;
-}
-
-/**
- * Отмечает камеры как «о них в это утро написали в helpdesk».
- *
- * Считаем именно факт упоминания в письме, а не «отправили напоминание»:
- * если камера попала в письмо заодно с новой поломкой соседа, напоминать о
- * ней через три дня незачем — оператор её только что видел. Мутирует state.
- *
- * @param {object} state — из loadState()
- * @param {Array}  items — камеры, попавшие в отправленные письма
- */
-export function markNotified(state, items, now = new Date().toISOString()) {
-  for (const item of items) {
-    const rec = state.cameras[cameraKey(item)];
-    if (rec) rec.notifiedAt = now;
-  }
+  return { newlyBroken, recovered, stillBroken, unchecked };
 }

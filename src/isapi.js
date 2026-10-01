@@ -10,6 +10,54 @@ import * as log from './logger.js';
 const digestCache = {};
 
 /**
+ * Предел ожидания одного ISAPI-запроса. Здоровый регистратор отвечает за
+ * секунды; без предела больной держал опрос по 12 минут (17–18.09.2026 —
+ * ответ за 170–750 с и обрыв) и почти выедал 15-минутное окно light-тика.
+ * Читается лениво: `.env` грузится первым импортом, но верхний уровень
+ * модуля всё равно исполняется раньше, чем нужно (см. src/load-env.js).
+ */
+function isapiTimeoutMs() {
+  const sec = Number.parseFloat(process.env.ISAPI_TIMEOUT_SEC);
+  return Number.isFinite(sec) && sec > 0 ? sec * 1000 : 30_000;
+}
+
+/**
+ * Текст ошибки fetch для лога и отчёта. Сам fetch кидает голое «fetch failed»
+ * или «terminated», а причина (ECONNRESET, ETIMEDOUT, «other side closed»)
+ * лежит в err.cause — без неё по логу не отличить сеть от регистратора.
+ */
+export function describeFetchError(err, timeoutMs) {
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+    return `нет ответа за ${Math.round(timeoutMs / 1000)} с`;
+  }
+  let cause = err?.cause;
+  if (Array.isArray(cause?.errors) && cause.errors.length) cause = cause.errors[0]; // AggregateError: несколько адресов
+  const detail = cause?.message || cause?.code;
+  const base = err?.message || String(err);
+  return detail && detail !== base ? `${base} (${detail})` : base;
+}
+
+/**
+ * fetch с таймаутом и уже прочитанным телом: `{ ok, status, headers, body }`.
+ * Тело читается здесь же, чтобы обрыв соединения посреди ответа тоже попал
+ * под таймаут и под describeFetchError, а не всплыл голым «terminated».
+ * У ошибки таймаута выставлен `timedOut` — по нему опрос перестаёт ждать
+ * остальные камеры.
+ */
+async function isapiFetch(url, init = {}, { binary = false } = {}) {
+  const timeoutMs = isapiTimeoutMs();
+  try {
+    const resp = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const body = binary ? Buffer.from(await resp.arrayBuffer()) : await resp.text();
+    return { ok: resp.ok, status: resp.status, headers: resp.headers, body };
+  } catch (err) {
+    const wrapped = new Error(describeFetchError(err, timeoutMs), { cause: err });
+    wrapped.timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    throw wrapped;
+  }
+}
+
+/**
  * Makes a digest-auth request to ISAPI endpoint (GET or POST).
  */
 export async function isapiRequest(baseUrl, path, user, pass, { method = 'GET', body = null } = {}) {
@@ -22,18 +70,18 @@ export async function isapiRequest(baseUrl, path, user, pass, { method = 'GET', 
   if (cached) {
     cached.nc++;
     const authHeader = buildDigestHeader(cached, user, method, path);
-    const resp = await fetch(url, { method, headers: { ...headers, 'Authorization': authHeader }, body });
-    if (resp.ok) return await resp.text();
+    const resp = await isapiFetch(url, { method, headers: { ...headers, 'Authorization': authHeader }, body });
+    if (resp.ok) return resp.body;
     if (resp.status !== 401) throw new Error(`ISAPI ${path} returned ${resp.status}`);
     // Nonce expired, fall through to re-auth
     delete digestCache[baseUrl];
   }
 
   // First request without auth to get the nonce
-  const resp1 = await fetch(url, { method, headers, body });
+  const resp1 = await isapiFetch(url, { method, headers, body });
 
   if (resp1.status !== 401) {
-    if (resp1.ok) return await resp1.text();
+    if (resp1.ok) return resp1.body;
     throw new Error(`Unexpected status ${resp1.status}`);
   }
 
@@ -53,10 +101,10 @@ export async function isapiRequest(baseUrl, path, user, pass, { method = 'GET', 
   digestCache[baseUrl] = params;
 
   const authHeader = buildDigestHeader(params, user, method, path);
-  const resp2 = await fetch(url, { method, headers: { ...headers, 'Authorization': authHeader }, body });
+  const resp2 = await isapiFetch(url, { method, headers: { ...headers, 'Authorization': authHeader }, body });
 
   if (!resp2.ok) throw new Error(`ISAPI ${path} returned ${resp2.status}`);
-  return await resp2.text();
+  return resp2.body;
 }
 
 /**
@@ -73,15 +121,15 @@ export async function isapiGetBinary(baseUrl, path, user, pass) {
   if (cached) {
     cached.nc++;
     const authHeader = buildDigestHeader(cached, user, 'GET', path);
-    const resp = await fetch(url, { headers: { 'Authorization': authHeader } });
-    if (resp.ok) return Buffer.from(await resp.arrayBuffer());
+    const resp = await isapiFetch(url, { headers: { 'Authorization': authHeader } }, { binary: true });
+    if (resp.ok) return resp.body;
     if (resp.status !== 401) throw new Error(`ISAPI binary ${path} returned ${resp.status}`);
     delete digestCache[baseUrl];
   }
 
-  const resp1 = await fetch(url, {});
+  const resp1 = await isapiFetch(url, {}, { binary: true });
   if (resp1.status !== 401) {
-    if (resp1.ok) return Buffer.from(await resp1.arrayBuffer());
+    if (resp1.ok) return resp1.body;
     throw new Error(`ISAPI binary unexpected status ${resp1.status}`);
   }
 
@@ -100,9 +148,9 @@ export async function isapiGetBinary(baseUrl, path, user, pass) {
   digestCache[baseUrl] = params;
 
   const authHeader = buildDigestHeader(params, user, 'GET', path);
-  const resp2 = await fetch(url, { headers: { 'Authorization': authHeader } });
+  const resp2 = await isapiFetch(url, { headers: { 'Authorization': authHeader } }, { binary: true });
   if (!resp2.ok) throw new Error(`ISAPI binary ${path} returned ${resp2.status}`);
-  return Buffer.from(await resp2.arrayBuffer());
+  return resp2.body;
 }
 
 function buildDigestHeader(params, user, method, path) {
@@ -286,8 +334,14 @@ export async function fetchHikvisionStatus(baseUrl, user, pass, { maxChannelId =
           cam.notes += cam.notes ? ', ' : '';
           cam.notes += `Нет записей за ${maxStaleHours}ч`;
         }
-      } catch {
-        // Search not supported or failed — skip silently
+      } catch (err) {
+        // Поиск не поддерживается или не удался — свежесть остаётся неизвестной.
+        // Но если регистратор не ответил за отведённое время, ждать столько же
+        // по каждой из оставшихся камер бессмысленно — он не оживёт за минуту.
+        if (err?.timedOut) {
+          log.warn(step, 'Проверка свежести прервана: регистратор не отвечает', { camera: cam.name, error: err.message });
+          break;
+        }
       }
     }
 

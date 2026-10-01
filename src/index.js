@@ -13,11 +13,12 @@
  *   node src/index.js --dry-run --only <id системы>  — только одна система
  *   node src/index.js --debug                     — подробные логи
  *   node src/index.js --reset-state               — обнулить helpdesk-state.json
- *   node src/index.js --no-snapshots              — не снимать кадры и не лезть на Я.Диск
+ *   node src/index.js --no-snapshots              — не снимать кадры и не лезть в Битрикс Диск
  *
  * v2 features:
- *   • helpdesk-state в state/helpdesk-state.json — заявки уходят только
- *     при смене статуса (active↔broken). См. src/state.js.
+ *   • helpdesk-state в state/helpdesk-state.json — момент поломки каждой
+ *     камеры, чтобы отличить новую от вчерашней. См. src/state.js.
+ *     (До v3.7 он же решал, слать ли письмо; теперь письмо ежедневное.)
  *   • Snapshots → Битрикс Диск — кадры заливаются в Битрикс с публичными
  *     ссылками. См. src/snapshots.js + src/bitrix-disk.js.
  *   • Live-монитор reports/live.html — auto-refresh 30 сек (обновляется
@@ -26,11 +27,15 @@
  *     за день. Light-прогоны его наполняют, daily-прогон рисует историю.
  */
 
+// .env — ПЕРВЫМ импортом: модули ниже читают process.env уже на верхнем
+// уровне, и если конфигурация опоздает, они молча получат пустоту.
+import './load-env.js';
+
 import fs from 'fs';
 import path from 'path';
 import * as log from './logger.js';
 
-import { buildReport, sendReport, cleanOldReports, REPORT_GROUPS, groupRecipients, collectBrokenCameras, sendHelpdeskReport, isUnusedChannel } from './reporter.js';
+import { buildReport, sendReport, cleanOldReports, reportGroups, groupRecipients, collectBrokenCameras, sendHelpdeskReport, isUnusedChannel } from './reporter.js';
 import { fetchHikvisionStatus } from './isapi.js';
 import { checkCamerasByRtsp } from './rtsp-check.js';
 import { checkTrassirSystem } from './trassir-check.js';
@@ -39,7 +44,7 @@ import { checkRecordingsSystem } from './recordings-check.js';
 import { checkHikvisionMultiSystem } from './hikvision-multi.js';
 import { checkRostelecomSystem } from './rostelecom-check.js';
 import { checkTplinkTapoSystem } from './tplink-tapo-check.js';
-import { loadState, saveState, resetState, diffAndUpdate, pickReminders, markNotified } from './state.js';
+import { loadState, saveState, resetState, diffAndUpdate } from './state.js';
 import { loadTodayTimeline, saveTimeline, diffAndAppend, summarize } from './timeline.js';
 import { openMonitorDb, recordRun } from './monitor-db.js';
 import { collectAttention, currentlyBrokenKeys, detectOutagesFromRun } from './stats.js';
@@ -55,13 +60,6 @@ import {
   ensureToday, loadDailyState, saveDailyState, recordOutbox,
   markSent, markFailed, pendingGroups, isGroupSent, todayMskDate, mskMinutes,
 } from './daily-state.js';
-
-// ─── Load .env ────────────────────────────────────────────────────────────────
-const dotenvPath = path.resolve('.env');
-if (fs.existsSync(dotenvPath)) {
-  const { default: dotenv } = await import('dotenv');
-  dotenv.config();
-}
 
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -112,7 +110,7 @@ if (process.env.TEST_MODE === 'true') {
     '║  отключён.                                                           ║',
     '╠══════════════════════════════════════════════════════════════════════╣',
     // Группы берём из .env (REPORT_GROUPS) — имён групп в коде нет.
-    ...REPORT_GROUPS.map((g) => `║  ${(g + ':').padEnd(21)}${truncate(groupRecipients(g), 47).padEnd(47)}║`),
+    ...reportGroups().map((g) => `║  ${(g + ':').padEnd(21)}${truncate(groupRecipients(g), 47).padEnd(47)}║`),
     `║  REPORT_TO (fallback):${truncate(process.env.REPORT_TO, 47).padEnd(47)}║`,
     `║  HELPDESK_TO:         ${truncate(process.env.HELPDESK_TO, 47).padEnd(47)}║`,
     `║  BITRIX_WEBHOOK_URL:  ${truncate(process.env.BITRIX_WEBHOOK_URL, 47).padEnd(47)}║`,
@@ -251,14 +249,14 @@ async function retryCustomerEmails() {
     // даже до сборки отчётов (как 15 июня) — поднимаем восстановительный прогон.
     if (dailyReportsExistToday()) {
       log.info('retry', 'Состояния за сегодня нет, но отчёты daily на диске есть — помечаю как отправленные, повтор не нужен');
-      state = ensureToday(REPORT_GROUPS);
-      for (const g of REPORT_GROUPS) markSent(state, g, null);
+      state = ensureToday(reportGroups());
+      for (const g of reportGroups()) markSent(state, g, null);
       saveDailyState(state);
       return;
     }
 
     log.warn('retry', 'За сегодня нет ни состояния, ни отчётов — daily не отработал, поднимаю восстановительный прогон');
-    state = ensureToday(REPORT_GROUPS);
+    state = ensureToday(reportGroups());
     state.lastAttemptAt = new Date().toISOString();   // занимаем 30-мин слот, чтобы не плодить прогоны
     saveDailyState(state);
     spawnDailyRecovery();
@@ -907,7 +905,7 @@ if (!onlyId) {
     // Считаем ПО ГРУППАМ, а не общим списком: потолок ATTENTION_LIMIT иначе
     // был бы общим на обе, и в плохой день камеры одного заказчика вытеснили
     // бы из письма камеры другого.
-    for (const g of REPORT_GROUPS) {
+    for (const g of reportGroups()) {
       attention.push(...collectAttention({ group: g, brokenKeys: currentlyBrokenKeys(g) }));
     }
     log.info('attention', `Камер требуют внимания: ${attention.length}`);
@@ -954,7 +952,7 @@ log.info('report', 'Live-монитор обновлён', { path: liveReportPat
 // Отдельные отчёты по группам (для email)
 let totalIssues = 0;
 const groupReports = [];
-for (const group of REPORT_GROUPS) {
+for (const group of reportGroups()) {
   const groupSystems = systemResults.filter(s => (s.group || '') === group);
   if (groupSystems.length === 0) continue;
 
@@ -984,6 +982,17 @@ for (const group of REPORT_GROUPS) {
   groupReports.push({ group, reportPath, issues: groupIssues, cidList: groupCidList });
 }
 
+// Пустой список групп = заказчику сегодня не уйдёт ни одного письма. Раньше
+// это проходило молча (см. 20.08.2026, когда `.env` грузился позже импортов),
+// поэтому здесь ошибка в лог с обеими сторонами сопоставления: что в `.env`
+// и какие группы реально пришли из config/systems.json.
+if (groupReports.length === 0 && systemResults.length > 0) {
+  log.error('report', 'Нет ни одной группы для рассылки — письма заказчику не уйдут', {
+    'REPORT_GROUPS': reportGroups().join(', ') || '(пусто)',
+    'группыСистем': [...new Set(systemResults.map(s => s.group || '(нет)'))].join(', '),
+  });
+}
+
 if (totalIssues > 0) {
   log.warn('report', `Обнаружено проблем: ${totalIssues}`);
 } else {
@@ -1002,10 +1011,17 @@ if (!isDryRun) {
   const dailyState = onlyId ? null : ensureToday(groupReports.map(g => g.group));
   if (dailyState) saveDailyState(dailyState);
 
+  // Чем закончилась рассылка по каждой группе — это уходит в утреннее письмо
+  // helpdesk отдельной строкой «отчёт отправлен / НЕ отправлен». Введено
+  // 04.09.2026: две недели рассылка молча не работала, и заметить это было
+  // неоткуда.
+  const deliveries = new Map();
+
   for (const { group, reportPath, issues, cidList } of groupReports) {
     // Уже отправлено сегодня (например, на восстановительном прогоне) — не дублируем.
     if (dailyState && isGroupSent(dailyState, group)) {
       log.info('email', `Email [${group}] уже отправлен сегодня — пропускаю`);
+      deliveries.set(group, { sent: true, to: dailyState.groups?.[group]?.to || '' });
       continue;
     }
     // Адресаты группы описаны в .env (REPORT_GROUPS) — имён групп в коде нет.
@@ -1026,16 +1042,41 @@ if (!isDryRun) {
         inlineImages: cidList,    // ← CID-attachments только этой группы
       });
       if (dailyState) { markSent(dailyState, group, to); saveDailyState(dailyState); }
+      deliveries.set(group, { sent: true, to });
       log.stepEnd('email', 'ok', `Email отправлен [${group}]`);
     } catch (err) {
       // Не валим процесс — отчёт уже сохранён локально, остальные письма
       // должны продолжать отправляться, а недосланные дотянет авто-досылка.
       if (dailyState) { markFailed(dailyState, group, { to, error: err.message, reportPath, cidList }); saveDailyState(dailyState); }
+      deliveries.set(group, { sent: false, to, error: err.message });
       log.stepEnd('email', 'fail', `Email не отправлен [${group}] (отчёт сохранён, будет авто-досылка)`, {
         error: err.message, reportPath,
       });
       emailFailures++;
     }
+  }
+
+  // Сводка по камерам группы для утреннего письма: «Проверено камер: 77 —
+  // работают 75, не работают 2». Фильтры те же, что у collectBrokenCameras
+  // (серые каналы и helpdeskIgnore не считаем) — иначе строка сводки спорила
+  // бы с разделом «не работают камеры» в том же письме.
+  function groupCameraStats(group) {
+    const st = { total: 0, online: 0, broken: 0, unknown: 0 };
+    for (const sys of systemResults) {
+      if ((sys.group || 'Прочее') !== group) continue;
+      const ignore = sys.helpdeskIgnore || [];
+      for (const cam of sys.cameras || []) {
+        if (isUnusedChannel(sys, cam)) continue;
+        const ch = cam.id != null ? cam.id : (cam.index ?? 0) + 1;
+        const label = cam.name || `${ch}`;
+        if (ignore.some(p => label.includes(p))) continue;
+        st.total++;
+        if (cam.online === false || cam.recording === false) st.broken++;
+        else if (cam.online === true) st.online++;
+        else st.unknown++;
+      }
+    }
+    return st;
   }
 
   // ── Helpdesk: дедупликация через state.js ──────────────────────────────
@@ -1063,26 +1104,12 @@ if (!isDryRun) {
       { systems: [...outages.downSystems].join(', ') });
   }
 
-  // Напоминания о том, что лежит давно (см. state.pickReminders). Без них
-  // объект, упавший вчера, сегодня из письма исчезал совсем — так 17.08.2026
-  // по группе не ушло ничего, хотя объект лежал целиком.
-  const reminders = onlyId ? [] : pickReminders(diff.stillBroken, {
-    downSystems:  outages.downSystems,
-    renotifyDays: Number(process.env.HELPDESK_RENOTIFY_DAYS) || 3,
-  });
-  if (reminders.length > 0) {
-    log.info('helpdesk', `Напоминаний по давним поломкам: ${reminders.length}`, {
-      объектыЦеликом: reminders.filter(r => r._reminder === 'outage').length,
-      камеры:         reminders.filter(r => r._reminder === 'renotify').length,
-    });
-  }
-
   log.info('helpdesk', 'Дедупликация заявок', {
     current: brokenCams.length,
     newlyBroken: diff.newlyBroken.length,
     recovered:   diff.recovered.length,
     stillBroken: diff.stillBroken.length,
-    напоминания: reminders.length,
+    unchecked:   diff.unchecked.length,
     stateSaved:  !onlyId,
   });
 
@@ -1129,76 +1156,84 @@ if (!isDryRun) {
     });
   }
 
-  // ── Одно письмо в helpdesk на группу ───────────────────────────────────────
-  // Уходит, если есть о чём сообщить: новая поломка, напоминание о давней,
-  // новая нестабильная камера или новый дефект картинки. Восстановления письма
-  // не вызывают — оператору не нужны сообщения «всё хорошо». В письмо при этом
-  // попадают ВСЕ актуальные поломки (newlyBroken + stillBroken), чтобы была
-  // видна полная картина.
+  // ── Одно письмо в helpdesk на группу, КАЖДЫЙ день ──────────────────────────
+  // До 04.09.2026 письмо уходило только по событию, и «тихое» утро выглядело
+  // точно так же, как сломанная рассылка. Теперь письмо приходит каждый день:
+  // в нём отметка, ушёл ли отчёт заказчику, сводка по камерам и — если есть —
+  // разделы про поломки. Утро без событий выглядит как «все камеры работают».
   //
   // При --only письмо не шлём: выборка частичная, diff.newlyBroken
   // может содержать ложные срабатывания.
-  const hasEvent = diff.newlyBroken.length > 0 || reminders.length > 0
+  const hasEvent = diff.newlyBroken.length > 0
     || attentionRows.length > 0 || qualityRows.length > 0;
 
-  // Группы, которые реально получат письмо. Считаем здесь, а не только внутри
-  // sendHelpdeskReport, потому что по этому же списку помечаем камеры как
-  // «упомянутые сегодня» — иначе напоминание сработало бы повторно.
-  const eventGroups = new Set();
-  for (const c of [...diff.newlyBroken, ...reminders]) eventGroups.add(c.group || 'Прочее');
-  for (const a of [...attentionRows, ...qualityRows]) eventGroups.add(a.group || 'Прочее');
+  // Кому писать. Основа — группы рассылки из .env: письмо в helpdesk идёт по
+  // тем же проектам, что и отчёт заказчику. Плюс группы, откуда пришли
+  // поломки (например, объект без группы в конфиге).
+  const helpdeskGroups = (() => {
+    const set = new Set(reportGroups());
+    if (set.size === 0) for (const s of systemResults) set.add(s.group || 'Прочее');
+    for (const c of brokenCams) set.add(c.group || 'Прочее');
+    return [...set];
+  })();
 
-  let helpdeskSent = false;
-  if (hasEvent && !onlyId) {
+  // Группа без записи о рассылке — это не «неизвестно», а «отчёт не ушёл»:
+  // ровно так выглядела поломка 20.08–04.09.2026, когда групп для рассылки не
+  // набиралось вовсе и писем не формировалось. Пусть письмо об этом говорит.
+  for (const g of helpdeskGroups) {
+    if (!deliveries.has(g)) {
+      deliveries.set(g, { sent: false, error: 'отчёт по этой группе не сформирован' });
+    }
+  }
+
+  const helpdeskStats = new Map(helpdeskGroups.map(g => [g, groupCameraStats(g)]));
+
+  // Группы, которым письмо реально ушло — для лога: при частичном сбое SMTP
+  // видно, какой проект остался без утреннего письма.
+  let sentGroups = [];
+  if (!onlyId) {
     const totalBroken = diff.newlyBroken.length + diff.stillBroken.length;
     log.stepStart('helpdesk', 'Отправка утреннего письма', {
       to: process.env.HELPDESK_TO,
-      группы:          [...eventGroups].join(', '),
+      группы:          helpdeskGroups.join(', '),
+      отчётЗаказчику:  helpdeskGroups.map(g => `${g}: ${deliveries.get(g)?.sent ? 'отправлен' : 'НЕ отправлен'}`).join(', '),
       newlyBroken:     diff.newlyBroken.length,
       stillBroken:     diff.stillBroken.length,
-      напоминания:     reminders.length,
       требуютВнимания: attentionRows.length,
       дефектыКадра:    qualityRows.length,
+      событий:         hasEvent ? 'есть' : 'нет (ежедневная отметка)',
     });
     try {
-      await sendHelpdeskReport({
+      const res = await sendHelpdeskReport({
         newlyBroken: diff.newlyBroken,
         stillBroken: diff.stillBroken,
-        reminders,
         runMeta,
         outages,
         attention: attentionRows,
         quality:   qualityRows,
+        daily:     true,
+        groups:    helpdeskGroups,
+        deliveries,
+        stats:     helpdeskStats,
       });
-      helpdeskSent = true;
+      sentGroups = res.sentGroups;
       log.stepEnd('helpdesk', 'ok',
-        `Письмо отправлено (сломано ${totalBroken}, внимание ${attentionRows.length}, картинка ${qualityRows.length})`);
+        `Письмо отправлено по группам: ${sentGroups.join(', ') || '(ни одной)'} `
+        + `(сломано ${totalBroken}, внимание ${attentionRows.length}, картинка ${qualityRows.length})`);
     } catch (err) {
-      log.stepEnd('helpdesk', 'fail', 'Письмо в helpdesk не отправлено', { error: err.message });
+      // Часть групп могла уйти успешно — их и помечаем.
+      sentGroups = err.sentGroups || [];
+      log.stepEnd('helpdesk', 'fail', 'Письмо в helpdesk отправлено не полностью', { error: err.message });
       emailFailures++;
     }
-  } else if (diff.recovered.length > 0 && diff.stillBroken.length === 0) {
-    log.info('helpdesk',
-      `${diff.recovered.length} камер восстановлено, новых событий нет — helpdesk не дёргаем`);
-  } else if (diff.stillBroken.length > 0) {
-    log.info('helpdesk',
-      `Изменений нет — helpdesk не дёргаем (${diff.stillBroken.length} камер всё ещё сломаны, `
-      + `напоминание через ${process.env.HELPDESK_RENOTIFY_DAYS || 3} дн. после последнего письма)`);
-  } else {
-    log.info('helpdesk', 'Событий нет — письмо в helpdesk не нужно');
   }
 
-  // State сохраняем в конце, уже с отметками «о чём написали сегодня»: срок
-  // напоминания отсчитывается от последнего УПОМИНАНИЯ камеры в письме, а не
-  // от момента поломки. При неудачной отправке отметку не ставим — тогда
-  // напоминание повторится завтра, а не через три дня.
-  if (!onlyId) {
-    if (helpdeskSent) {
-      markNotified(state, [...diff.newlyBroken, ...diff.stillBroken]
-        .filter(c => eventGroups.has(c.group || 'Прочее')));
-    }
-    saveState(state);
-  }
+  // State сохраняем в конце прогона: в нём момент поломки каждой камеры,
+  // по нему следующий прогон отличит новую поломку от вчерашней. Отметок
+  // «о чём написали сегодня» больше нет — письмо ежедневное, и все сломанные
+  // камеры в нём и так перечислены (механизм напоминаний снят 04.09.2026,
+  // код — в archive/helpdesk-reminders/).
+  if (!onlyId) saveState(state);
 } else {
   // DRY-RUN: state не трогаем. Раньше тут был saveState(), но при выборочном
   // прогоне (--only one-system) выборка systemResults неполная: камеры из
@@ -1214,6 +1249,7 @@ if (!isDryRun) {
     newlyBroken: diff.newlyBroken.length,
     recovered:   diff.recovered.length,
     stillBroken: diff.stillBroken.length,
+    unchecked:   diff.unchecked.length,
     only:        onlyId || 'all',
   });
 }

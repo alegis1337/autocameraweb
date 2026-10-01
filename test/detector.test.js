@@ -125,6 +125,32 @@ test('detectSystemOutages: объект из двух сломанных кам�
   assert.equal(downSystems.size, 0);
 });
 
+test('detectSystemOutages: «нет записи» объект не роняет — он на связи', () => {
+  // Регрессия 18.09.2026: три канала объекта записей с рваным архивом ушли в
+  // helpdesk как «объект недоступен целиком (не отвечают 3 камер из 3)».
+  const cams = [
+    { cam_key: 'e|9',  system_id: 'e', status: 'no-recording' },
+    { cam_key: 'e|11', system_id: 'e', status: 'no-recording' },
+    { cam_key: 'e|13', system_id: 'e', status: 'no-recording' },
+  ];
+  const { downSystems, bySystem } = detectSystemOutages(cams, { ratio: 0.8, minCameras: 3 });
+  assert.equal(downSystems.size, 0);
+  assert.equal(bySystem.get('e').broken, 0);
+  assert.equal(bySystem.get('e').total, 3);
+});
+
+test('detectSystemOutages: «нет записи» рядом с offline в число не отвечающих не входит', () => {
+  const cams = [
+    { cam_key: 'f|1', system_id: 'f', status: 'offline' },
+    { cam_key: 'f|2', system_id: 'f', status: 'offline' },
+    { cam_key: 'f|3', system_id: 'f', status: 'offline' },
+    { cam_key: 'f|4', system_id: 'f', status: 'no-recording' },
+  ];
+  const { downSystems, bySystem } = detectSystemOutages(cams, { ratio: 0.7, minCameras: 3 });
+  assert.ok(downSystems.has('f'));
+  assert.equal(bySystem.get('f').broken, 3);
+});
+
 test('detectSystemOutages: камеры без данных в расчёт доли не идут', () => {
   const cams = [
     { cam_key: 'd|1', system_id: 'd', status: 'unknown' },

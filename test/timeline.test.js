@@ -30,5 +30,5 @@ test('todayYmd: дата форматируется с ведущими нуля
 });
 
 test('cameraKey: ключ вида systemId|cameraName', () => {
-  assert.equal(cameraKey('office', 'CH11'), 'office|CH11');
+  assert.equal(cameraKey('site-2', 'CH11'), 'site-2|CH11');
 });

@@ -7,7 +7,9 @@ import path from 'path';
 import dns from 'dns';
 import nodemailer from 'nodemailer';
 import { randomUUID } from 'crypto';
+import * as log from './logger.js';
 import { describeDefects } from './image-quality.js';
+import { CHECK_ERROR_STATUS } from './state.js';
 
 // На этой VM системный DNS-сервер — 127.0.0.1 (битый локальный резолвер),
 // из-за чего dns.resolve4 падает с queryA ETIMEOUT при отправке через nodemailer.
@@ -75,14 +77,25 @@ function parseGroupEnv(raw) {
   return map;
 }
 
-const GROUP_ENV = parseGroupEnv(process.env.REPORT_GROUPS);
+// Разбор откладываем до первого обращения, а не делаем на верхнем уровне
+// модуля: там `.env` может быть ещё не загружен (импорты выполняются раньше
+// тела точки входа), и группы молча оказались бы пустыми — ровно так
+// 20.08.2026 прекратилась рассылка отчётов заказчикам. Результат кешируем:
+// в пределах прогона окружение не меняется.
+let groupEnvCache = null;
+function groupEnv() {
+  if (groupEnvCache === null) groupEnvCache = parseGroupEnv(process.env.REPORT_GROUPS);
+  return groupEnvCache;
+}
 
 /** Группы, по которым формируются отдельные письма (порядок — как в `.env`). */
-export const REPORT_GROUPS = [...GROUP_ENV.keys()];
+export function reportGroups() {
+  return [...groupEnv().keys()];
+}
 
 /** Адресаты письма по группе; пусто — вызывающий откатится на `REPORT_TO`. */
 export function groupRecipients(group) {
-  const suffix = GROUP_ENV.get(group);
+  const suffix = groupEnv().get(group);
   return (suffix && process.env[`REPORT_TO_${suffix}`]) || '';
 }
 
@@ -140,10 +153,11 @@ export function buildReport({ systemResults, runMeta, group, outputPath, liveMod
   // Иначе берём все группы из REPORT_GROUPS, или всё (для тестов и для
   // случая, когда группы в .env не описаны вовсе).
   let filtered;
+  const groups = reportGroups();
   if (group) {
     filtered = systemResults.filter(s => (s.group || '') === group);
-  } else if (REPORT_GROUPS.length) {
-    filtered = systemResults.filter(s => REPORT_GROUPS.includes(s.group || ''));
+  } else if (groups.length) {
+    filtered = systemResults.filter(s => groups.includes(s.group || ''));
     if (filtered.length === 0) filtered = systemResults;
   } else {
     filtered = systemResults;
@@ -794,7 +808,7 @@ export async function sendReport({ reportPath, issueCount, runTime, screenshotPa
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await transporter.sendMail(buildMail(to));
+        logSmtpReceipt('email', await transporter.sendMail(buildMail(to)), to, groupLabel);
         return;
       } catch (err) {
         lastErr = err;
@@ -837,14 +851,15 @@ export function collectBrokenCameras(systemResults) {
 
     const group = sys.group || 'Прочее';
 
-    // Ошибка всей системы — добавляем как одну запись
+    // Ошибка всей системы — добавляем как одну запись. По этому статусу
+    // state.diffAndUpdate не трогает камеры объекта: они не проверены.
     if (sys.error) {
       broken.push({
         systemId: sys.id,
         group,
         system: sys.name,
         camera: '(вся система)',
-        status: 'ошибка проверки',
+        status: CHECK_ERROR_STATUS,
         notes: sys.error,
       });
       continue;
@@ -1043,6 +1058,89 @@ function fmtDurMin(min) {
 }
 
 /**
+ * Записать квитанцию SMTP-сервера в лог (04.09.2026).
+ *
+ * Раньше результат `sendMail` выбрасывался, и на вопрос «письмо не пришло»
+ * ответить было нечем: в логе стояло «отправлено», а что именно ответил сервер
+ * — неизвестно. Яндекс возвращает в `response` идентификатор очереди; с ним
+ * видно, приняло ли письмо ЕГО сторона, и дальше искать надо уже в ящике
+ * (папка, фильтр, правило), а не в коде.
+ *
+ * Доставку до ящика получателя это по-прежнему не доказывает: SMTP отвечает
+ * только за приём. Отлуп, если он будет, придёт письмом на SMTP_USER.
+ */
+function logSmtpReceipt(step, info, to, groupLabel) {
+  if (!info) return;
+  log.info(step, `SMTP принял письмо${groupLabel ? ' [' + groupLabel + ']' : ''}`, {
+    кому:     to,
+    принято:  (info.accepted || []).join(', ') || '(нет)',
+    отклонено: (info.rejected || []).join(', ') || '(нет)',
+    ответ:    String(info.response || '').replace(/[\r\n\t ]+/g, ' ').slice(0, 160),
+  });
+}
+
+/** Экранирование текста, пришедшего извне (например, ошибки SMTP). */
+function escapeHtmlText(s) {
+  return String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+/**
+ * Строка «отчёт заказчику отправлен / НЕ отправлен» (04.09.2026).
+ *
+ * Появилась после двух недель, когда рассылка молча не работала и этого никто
+ * не заметил. Теперь письмо в helpdesk приходит каждое утро и прямо говорит,
+ * ушёл отчёт или нет. Состояние — на момент этой проверки: письмо в helpdesk
+ * уходит сразу после рассылки, а автодосылка может сработать позже днём.
+ *
+ * @param {object} delivery — { sent:boolean, to?:string, error?:string }
+ * @param {string} dateStr  — дата прогона «ДД.ММ.ГГГГ»
+ */
+function deliveryParagraph(delivery, dateStr) {
+  if (!delivery) return '';
+  if (delivery.sent) {
+    const n = String(delivery.to || '').split(',').map((s) => s.trim()).filter(Boolean).length;
+    const addr = n ? ` (${n} ${plural(n, 'адрес', 'адреса', 'адресов')})` : '';
+    return `<p>Отчёт по видеонаблюдению за ${dateStr} <strong>отправлен</strong> заказчику${addr}.</p>`;
+  }
+  const why = delivery.error ? `<br>Причина: ${escapeHtmlText(delivery.error)}.` : '';
+  return `<p><strong>Отчёт по видеонаблюдению за ${dateStr} заказчику НЕ отправлен.</strong>${why}`
+    + '<br>Система попробует дослать его автоматически в течение дня.</p>';
+}
+
+/** Сводка по камерам группы одной строкой — чтобы «всё хорошо» было с цифрами. */
+function statsParagraph(stats) {
+  if (!stats || typeof stats.total !== 'number') return '';
+  const parts = [`работают ${stats.online}`];
+  if (stats.broken)  parts.push(`не работают ${stats.broken}`);
+  if (stats.unknown) parts.push(`нет данных ${stats.unknown}`);
+  return `<p>Проверено камер: <strong>${stats.total}</strong> — ${parts.join(', ')}.</p>`;
+}
+
+/**
+ * Тема письма в helpdesk. Вынесена отдельно, потому что она обязана совпадать
+ * с телом: тема становится заголовком заявки в 1С, и «не работают камеры» на
+ * письме «всё хорошо» отправило бы инженера искать несуществующую поломку.
+ *
+ * @param {object} p
+ * @param {string} p.groupName    — имя группы объектов
+ * @param {string} p.dateStr      — «ДД.ММ.ГГГГ»
+ * @param {number} p.brokenCount  — сколько проблем в разделе «не работают»
+ * @param {number} p.extrasCount  — «обратите внимание» + «изображение» + «ракурс»
+ * @param {object} p.delivery     — статус рассылки отчёта заказчику или null
+ */
+export function helpdeskSubject({ groupName, dateStr, brokenCount = 0, extrasCount = 0, delivery = null }) {
+  const base = brokenCount > 0
+    ? `${groupName} — не работают камеры ${dateStr} (${brokenCount} шт.)`
+    : extrasCount > 0
+      ? `${groupName} — обратите внимание на камеры ${dateStr} (${extrasCount} шт.)`
+      : `${groupName} — все камеры работают ${dateStr}`;
+  // Несостоявшаяся рассылка видна прямо в теме: в 1С по списку заявок это
+  // единственное, что оператор читает, не открывая письмо.
+  const warn = delivery && delivery.sent === false ? ' — отчёт заказчику НЕ отправлен' : '';
+  return `[HELPDESK] ${base}${warn}`;
+}
+
+/**
  * Утреннее письмо в helpdesk — ОДНО на группу, всё в нём.
  *
  * Три вида событий в одном письме, а не в трёх рассылках (решение
@@ -1059,7 +1157,8 @@ function fmtDurMin(min) {
  * @param {object} runMeta    — { startTime, ... }
  * @param {string} groupLabel — имя группы объектов
  * @param {object} outages    — { downSystems:Set, bySystem:Map } или null
- * @param {object} extras     — { attention: [], quality: [] }
+ * @param {object} extras     — { attention: [], quality: [],
+ *                                delivery: {sent,to,error}, stats: {total,online,broken,unknown} }
  */
 export function buildHelpdeskTextHtml(brokenList, runMeta, groupLabel = '', outages = null, extras = {}) {
   const startDate = new Date(runMeta.startTime);
@@ -1108,6 +1207,15 @@ export function buildHelpdeskTextHtml(brokenList, runMeta, groupLabel = '', outa
       const st = bySystemStats.get(sysId);
       const detail = st ? ` (не отвечают ${st.broken} камер из ${st.total})` : '';
       brokenItems.push(`<strong>${sysName} — объект недоступен целиком</strong>${detail}${sinceSuffix(cams)}`);
+      continue;
+    }
+
+    // Опрос объекта упал целиком — про камеры сказать нечего, пишем причину.
+    // Раньше падало в «прочие статусы» и читалось «Объект — проблема: (вся система)».
+    const failed = cams.find(c => c.status === CHECK_ERROR_STATUS);
+    if (failed) {
+      const why = failed.notes ? `: ${escapeHtmlText(failed.notes)}` : '';
+      brokenItems.push(`${sysName} — объект проверить не удалось${why}`);
       continue;
     }
 
@@ -1203,11 +1311,23 @@ export function buildHelpdeskTextHtml(brokenList, runMeta, groupLabel = '', outa
     ? sections.map((s, i) => `<p><strong>${i + 1}. ${s.title}</strong></p>\n${s.body}`).join('\n\n')
     : '';
 
+  // «Все камеры работают» говорим только тогда, когда это правда целиком:
+  // сломанных нет, замечаний нет и по каждой камере есть свежий ответ. Если
+  // по части камер данных нет, формулировка мягче — иначе письмо ручалось бы
+  // за то, чего не проверяло.
+  const stats = extras.stats || null;
+  const allGood = total === 0 && attention.length === 0 && quality.length === 0
+    && stats && stats.total > 0 && stats.broken === 0 && stats.unknown === 0;
+
   const headline = total > 0
     ? `<p>Автоматическая проверка <strong>${dateStr} ${timeStr}</strong> выявила <strong>${total}</strong> ${word}${projectPart}:</p>`
-    : `<p>Автоматическая проверка <strong>${dateStr} ${timeStr}</strong>${projectPart}: неработающих камер нет.</p>`;
+    : allGood
+      ? `<p>Автоматическая проверка <strong>${dateStr} ${timeStr}</strong>${projectPart}: <strong>все камеры работают</strong>, замечаний нет.</p>`
+      : `<p>Автоматическая проверка <strong>${dateStr} ${timeStr}</strong>${projectPart}: неработающих камер нет.</p>`;
 
-  const title = total > 0 ? `Не работают камеры ${dateStr}` : `Обратите внимание ${dateStr}`;
+  const title = total > 0
+    ? `Не работают камеры ${dateStr}`
+    : (allGood ? `Все камеры работают ${dateStr}` : `Обратите внимание ${dateStr}`);
 
   // Намеренно НЕ используем inline-CSS / таблицы — 1С их отображает «кучей».
   // <ul>/<li> — базовый HTML: отступ рисует сам почтовый клиент, а если
@@ -1220,6 +1340,9 @@ export function buildHelpdeskTextHtml(brokenList, runMeta, groupLabel = '', outa
 <p>Здравствуйте!</p>
 
 ${headline}
+
+${deliveryParagraph(extras.delivery || null, dateStr)}
+${statsParagraph(stats)}
 
 ${body}
 
@@ -1245,18 +1368,22 @@ export const buildHelpdeskHtml = (brokenCams, runMeta, groupLabel = '') =>
  * Отправляет ЕДИНСТВЕННОЕ утреннее письмо в helpdesk — по одному на группу.
  *
  * Логика:
- *   • Письмо уходит, если у группы есть хоть одно событие, о котором ещё не
+ *   • С 04.09.2026 при `daily: true` письмо уходит КАЖДОЙ группе каждое утро,
+ *     даже когда сообщать нечего: оператору нужна ежедневная отметка, что
+ *     проверка отработала и отчёт заказчику ушёл. Пустое утро выглядит как
+ *     «все камеры работают» плюс строка о рассылке.
+ *   • Без `daily` (старое поведение, осталось для выборочных вызовов) письмо
+ *     уходит, только если у группы есть хоть одно событие, о котором ещё не
  *     сообщали: новая поломка, новая нестабильная камера или новый дефект
- *     изображения. Одни восстановления письма не вызывают — оператору не
- *     нужны сообщения «всё хорошо».
- *   • Если триггер сработал, в письме идут ВСЕ актуальные события группы:
- *     все сломанные камеры (newlyBroken ∪ stillBroken), все нестабильные и
- *     все дефекты изображения. Оператор видит полную картину по объекту.
+ *     изображения. Одни восстановления письма не вызывают.
+ *   • В письме идут ВСЕ актуальные события группы: все сломанные камеры
+ *     (newlyBroken ∪ stillBroken), все нестабильные и все дефекты
+ *     изображения. Оператор видит полную картину по объекту.
  *   • Отдельных рассылок «нестабильные камеры» и «плохое изображение» больше
  *     нет — 05.08.2026 пользователь свёл всё в одно письмо.
  *
  * @param {object} params
- * @param {Array}  params.newlyBroken — новые поломки (один из триггеров)
+ * @param {Array}  params.newlyBroken — поломки, которых не было в прошлом прогоне
  * @param {Array}  params.stillBroken — давно лежащие камеры (для полноты письма)
  * @param {Array}  params.recovered   — восстановленные (НЕ используется,
  *                                       оставлен для совместимости вызова)
@@ -1264,11 +1391,16 @@ export const buildHelpdeskHtml = (brokenCams, runMeta, groupLabel = '') =>
  * @param {object} params.outages     — объекты, упавшие целиком
  * @param {Array}  params.attention   — нестабильные камеры, о которых ещё не писали
  * @param {Array}  params.quality     — дефекты изображения, о которых ещё не писали
+ * @param {boolean} params.daily      — слать каждой группе, даже если событий нет
+ * @param {Array}  params.groups      — какие группы обязаны получить письмо при daily
+ * @param {Map}    params.deliveries  — группа → { sent, to, error }: ушёл ли отчёт заказчику
+ * @param {Map}    params.stats       — группа → { total, online, broken, unknown }
+ * @returns {Promise<{sentGroups: string[]}>} группы, которым письмо реально ушло
  *
  * Совместимость: если передан params.brokenCams (старый API), он трактуется
  * как newlyBroken и одновременно как stillBroken — всё одной кучей шлём.
  */
-export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, brokenCams, runMeta, outages = null, attention = [], quality = [], reminders = [] }) {
+export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, brokenCams, runMeta, outages = null, attention = [], quality = [], daily = false, groups = [], deliveries = null, stats = null }) {
   // Совместимость со старым API.
   if (!newlyBroken && Array.isArray(brokenCams)) {
     newlyBroken = brokenCams;
@@ -1278,18 +1410,18 @@ export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, 
   stillBroken = stillBroken || [];
   attention = Array.isArray(attention) ? attention : [];
   quality   = Array.isArray(quality)   ? quality   : [];
-  reminders = Array.isArray(reminders) ? reminders : [];
   // recovered нам теперь не нужен — оставлен в сигнатуре, чтобы
   // не ломать вызывающую сторону.
 
   const helpdeskTo = (process.env.HELPDESK_TO || '')
     .split(',').map(e => e.trim()).filter(Boolean);
-  if (helpdeskTo.length === 0) return;
+  if (helpdeskTo.length === 0) return { sentGroups: [] };
 
-  // Триггер: новая поломка, напоминание о давней ИЛИ событие, о котором ещё
-  // не сообщали. Восстановления сами по себе письма не вызывают.
-  if (newlyBroken.length === 0 && reminders.length === 0
-      && attention.length === 0 && quality.length === 0) return;
+  // Триггер нужен только старому режиму «по событию»: новая поломка или
+  // замечание, о котором ещё не сообщали. При daily (обычный путь с 04.09.2026)
+  // письмо уходит в любом случае, и проверка пропускается.
+  if (!daily && newlyBroken.length === 0
+      && attention.length === 0 && quality.length === 0) return { sentGroups: [] };
 
   // В письмо включаем все актуальные поломки (новые + давнишние).
   const allBroken = [...newlyBroken, ...stillBroken];
@@ -1306,8 +1438,10 @@ export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, 
     }
     return allByGroup.get(key);
   };
+  // При ежедневной отправке группы заводим заранее: письмо «всё хорошо» должно
+  // уйти и той группе, по которой сегодня вообще ничего не случилось.
+  if (daily) for (const g of groups) ensureGroup(g);
   for (const c of newlyBroken) ensureGroup(c.group).hasEvent = true;
-  for (const c of reminders)   ensureGroup(c.group).hasEvent = true;
   for (const c of allBroken)   ensureGroup(c.group).broken.push(c);
   for (const a of attention) { const g = ensureGroup(a.group); g.attention.push(a); g.hasEvent = true; }
   for (const q of quality)   { const g = ensureGroup(q.group); g.quality.push(q);   g.hasEvent = true; }
@@ -1322,16 +1456,22 @@ export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, 
   const fromAddr = process.env.SMTP_USER;
   const fromDomain = (fromAddr.split('@')[1] || senderDomain()).trim();
 
+  const pick = (map, groupName) => (map instanceof Map ? map.get(groupName) : null) || null;
+
   const buildMail = (to, groupName, payload) => {
     const { broken, attention: att, quality: qual } = payload;
+    const delivery = pick(deliveries, groupName);
     const html = buildHelpdeskTextHtml(broken, runMeta, groupName, outages,
-      { attention: att, quality: qual });
+      { attention: att, quality: qual, delivery, stats: pick(stats, groupName) });
     // Тема должна совпадать с тем, что внутри: если неработающих камер нет,
     // а есть только «обратите внимание», заголовок «не работают камеры» врал бы.
-    const brokenCount = countHelpdeskIssues(broken, outages);
-    const subject = brokenCount > 0
-      ? `[HELPDESK] ${groupName} — не работают камеры ${dd}.${mm}.${yyyy} (${brokenCount} шт.)`
-      : `[HELPDESK] ${groupName} — обратите внимание на камеры ${dd}.${mm}.${yyyy} (${att.length + qual.length} шт.)`;
+    const subject = helpdeskSubject({
+      groupName,
+      dateStr: `${dd}.${mm}.${yyyy}`,
+      brokenCount: countHelpdeskIssues(broken, outages),
+      extrasCount: att.length + qual.length,
+      delivery,
+    });
     return {
       from: `"AutoCamera Helpdesk" <${fromAddr}>`,
       envelope: { from: fromAddr, to: [to] },
@@ -1355,7 +1495,7 @@ export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, 
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await transporter.sendMail(buildMail(to, groupName, payload));
+        logSmtpReceipt('helpdesk', await transporter.sendMail(buildMail(to, groupName, payload)), to, groupName);
         return;
       } catch (err) {
         lastErr = err;
@@ -1366,23 +1506,34 @@ export async function sendHelpdeskReport({ newlyBroken, stillBroken, recovered, 
   };
 
   // Каждой группе — каждому получателю отдельное письмо (Яндекс SPAM workaround).
-  // Шлём только в те группы, где есть событие.
+  // При daily пишем всем группам, иначе — только тем, где есть событие.
   const failures = [];
+  const sentGroups = [];
   for (const [groupName, payload] of allByGroup) {
-    if (!payload.hasEvent) continue;
-    if (payload.broken.length === 0 && payload.attention.length === 0 && payload.quality.length === 0) continue;
+    if (!daily) {
+      if (!payload.hasEvent) continue;
+      if (payload.broken.length === 0 && payload.attention.length === 0 && payload.quality.length === 0) continue;
+    }
+    let ok = true;
     for (const to of helpdeskTo) {
       try {
         await sendOneWithRetry(to, groupName, payload);
       } catch (err) {
+        ok = false;
         failures.push({ to, groupName, error: err.message });
       }
     }
+    // Группу считаем оповещённой, только если письмо ушло всем адресатам:
+    // по этому списку вызывающий помечает камеры как «упомянутые сегодня».
+    if (ok) sentGroups.push(groupName);
   }
   if (failures.length > 0) {
     const summary = failures.map(f => `${f.groupName} → ${f.to}: ${f.error}`).join('; ');
-    throw new Error(summary);
+    const err = new Error(summary);
+    err.sentGroups = sentGroups;   // часть групп могла уйти успешно
+    throw err;
   }
+  return { sentGroups };
 }
 
 /**

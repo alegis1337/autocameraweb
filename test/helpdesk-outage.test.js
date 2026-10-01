@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildHelpdeskTextHtml, countHelpdeskIssues } from '../src/reporter.js';
+import { CHECK_ERROR_STATUS } from '../src/state.js';
 
 const runMeta = { startTime: Date.parse('2026-08-04T07:00:00+03:00') };
 
@@ -181,4 +182,16 @@ test('только смена ракурса — раздела про каче�
   const html = buildHelpdeskTextHtml([], runMeta, 'Группа A', null, { quality: rows });
   assert.doesNotMatch(html, /Обратите внимание на изображение/);
   assert.match(html, /Камеры смотрят не туда/);
+});
+
+test('упавший опрос объекта — строка с причиной, а не «проблема: (вся система)»', () => {
+  const list = [
+    { systemId: 'site-3', system: 'Объект 3 (NVR-C)', group: 'Группа A', camera: '(вся система)',
+      status: CHECK_ERROR_STATUS, notes: 'fetch failed (connect ETIMEDOUT 192.0.2.10:80)' },
+    brokenCam('site-4', 'Объект 4 (NVR-C)', 'Camera 02'),
+  ];
+  const html = buildHelpdeskTextHtml(list, runMeta, 'Группа A');
+  assert.match(html, /Объект 3 — объект проверить не удалось: fetch failed \(connect ETIMEDOUT 192\.0\.2\.10:80\)/);
+  assert.doesNotMatch(html, /проблема: \(вся система\)/);
+  assert.match(html, /Объект 4 — не работают камеры: 2/);
 });

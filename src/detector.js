@@ -92,9 +92,15 @@ export function collectUnstable(events, { fromIso, toIso, skipCamKeys, minDownti
  * одновременно, и helpdesk получает 16 заявок об одном и том же. Оператору нужна
  * одна: «объект недоступен целиком».
  *
- * Объект считается упавшим, если сломана доля камер не меньше `ratio`
- * и при этом сломанных не меньше `minCameras` — чтобы объект из двух камер
+ * Объект считается упавшим, если не отвечает доля камер не меньше `ratio`
+ * и при этом не отвечающих не меньше `minCameras` — чтобы объект из двух камер
  * не «падал целиком» от одной поломки.
+ *
+ * Считаем только `offline`. «Нет записи» (`no-recording`) — камера на связи,
+ * и объект достижим; 18.09.2026 три канала объекта записей с рваным архивом
+ * дали в письме «объект недоступен целиком (не отвечают 3 камер из 3)», хотя
+ * шара отвечала и файлы писались. В `bySystem.broken` поэтому тоже только
+ * не отвечающие — письмо пишет «не отвечают N камер из M».
  *
  * @param {Array}  cameras — [{ cam_key, system_id, status }]
  * @param {object} opts    — { ratio = 0.8, minCameras = 3 }
@@ -109,7 +115,7 @@ export function detectSystemOutages(cameras, { ratio = 0.8, minCameras = 3 } = {
     // сказал, и «сломано 100%» из двух unknown — это не сбой объекта.
     if (c.status === 'unknown' || c.status == null) continue;
     s.total++;
-    if (isBrokenKind(c.status)) s.broken++;
+    if (c.status === 'offline') s.broken++;
   }
 
   const downSystems = new Set();

@@ -1,20 +1,33 @@
 /**
  * Проверка папок с записями по SMB.
  *
- * Используется для систем, где регистратор пишет mp4-файлы в SMB-шару:
- * каждый канал — отдельная папка, файлы ротируются (новый чанк раз в N минут).
+ * Используется для систем, где регистратор пишет видеофайлы в SMB-шару:
+ * каждый канал — отдельная папка, файлы ротируются (новый чанк раз в N минут
+ * или при каждом переподключении к потоку).
  *
  * Алгоритм:
  *   1. Поднять SMB-сессию (idempotent).
- *   2. Для каждого канала забрать N последних файлов (имя / размер / возраст).
+ *   2. Для каждого канала забрать N последних видеофайлов (имя / размер / возраст).
+ *      Только видео: рядом с записями регистратор держит свой лог
+ *      (`watchdog.log`), который пишется каждую секунду и иначе становился бы
+ *      «самым свежим файлом» выборки.
  *   3. online = recording = true только если:
  *      • самый свежий файл моложе freshnessMin минут И
  *      • его размер >= minFileSizeKb (т.е. чанк не "битый") И
  *      • среди последних N файлов доля битых не превышает maxBadRatio.
  *
  * Битый файл = размер < minFileSizeKb (по умолчанию 100 КБ). Регистратор пишет
- * mp4-чанки от 250 КБ до 2–3 МБ; обрыв RTSP-потока даёт файлы по 48 байт
- * (только заголовок mp4) — именно их мы и ловим.
+ * чанки от 250 КБ до нескольких МБ; обрыв потока оставляет файл в десятки байт
+ * (один заголовок контейнера) — именно их мы и ловим.
+ *
+ * Две ловушки, на которых чекер уже ошибался (17.07–11.09.2026, каждый день):
+ *   • Файл, который пишется прямо сейчас, может оказаться «из будущего»
+ *     относительно момента, когда взяли текущее время (листинг папки на тысячи
+ *     файлов идёт секунды; часы регистратора могут спешить). Отрицательный
+ *     возраст — это самый свежий файл, а не устаревший: минус приравниваем к нулю.
+ *   • Только что открытый файл пуст, пока регистратор не подключился к потоку.
+ *     Это пауза при переподключении, а не битый чанк: пока ему меньше
+ *     OPENING_GRACE_MIN минут, судим по предыдущему файлу.
  *
  * Пример конфига в systems.json:
  *   {
@@ -45,6 +58,15 @@ const DEFAULT_SAMPLE_SIZE    = 20;
 const DEFAULT_MIN_FILE_KB    = 100;
 const DEFAULT_MAX_BAD_RATIO  = 0.30;
 
+// Сколько минут пустому свежему файлу прощаем как «регистратор ещё подключается».
+// Сторож перезапускает ffmpeg через 5 с, RTSP-рукопожатие — ещё секунды;
+// две минуты — с запасом, но заметно меньше freshnessMin.
+const OPENING_GRACE_MIN = 2;
+
+// Что считаем записью. Всё остальное в папке (лог сторожа, служебные файлы)
+// в выборку не попадает.
+const VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov', '.ts', '.flv'];
+
 /**
  * Запрашивает PS-скриптом N последних файлов на канал.
  * Возвращает массив items вида:
@@ -68,14 +90,18 @@ async function listFreshness({ host, shareName, basePath, channels, sampleSize }
     if ($basePath) { $root = Join-Path $root $basePath }
 
     $folders = '${foldersJson}' | ConvertFrom-Json
-    $now = Get-Date
+    $videoExt = @(${VIDEO_EXTENSIONS.map((e) => `'${e}'`).join(',')})
     $sample = ${Number.isInteger(sampleSize) ? sampleSize : DEFAULT_SAMPLE_SIZE}
     $results = @()
 
     foreach ($folder in $folders) {
       $dir = Join-Path $root $folder
       $files = Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+        Where-Object { $videoExt -contains $_.Extension.ToLower() } |
         Sort-Object LastWriteTime -Descending | Select-Object -First $sample
+      # Время берём ПОСЛЕ листинга: он идёт секунды, и файл, дописанный за это
+      # время, иначе получал бы отрицательный возраст.
+      $now = Get-Date
 
       if (-not $files) {
         $results += [pscustomobject]@{
@@ -113,7 +139,19 @@ async function listFreshness({ host, shareName, basePath, channels, sampleSize }
 }
 
 /**
- * Решает, считать ли канал работающим, по списку последних файлов.
+ * Только что открытый регистратором файл: маленький и свежий. Пока не пришёл
+ * первый кадр, он пуст — судить по нему нельзя, а вот предыдущий файл говорит
+ * о канале честно.
+ */
+function isOpeningFile(file, cfg) {
+  const ageMin = Number(file.ageMin);
+  return Number(file.size) < cfg.minFileBytes
+    && Number.isFinite(ageMin) && ageMin <= OPENING_GRACE_MIN;
+}
+
+/**
+ * Решает, считать ли канал работающим, по списку последних файлов
+ * (самый свежий — первым).
  *
  * @param {Array<{name,size,ageMin}>} files
  * @param {object} cfg
@@ -125,7 +163,11 @@ async function listFreshness({ host, shareName, basePath, channels, sampleSize }
  *   newestAgeMin:number, badCount:number, totalCount:number, lastSizeBytes:number
  * }}
  */
-function evaluateChannel(files, cfg) {
+export function evaluateChannel(files, cfg) {
+  if (files.length > 1 && isOpeningFile(files[0], cfg)) {
+    files = files.slice(1);
+  }
+
   const totalCount = files.length;
 
   if (!totalCount) {
@@ -137,8 +179,10 @@ function evaluateChannel(files, cfg) {
   }
 
   const newest = files[0];
-  const newestAgeMin = Number(newest.ageMin);
-  const fresh = Number.isFinite(newestAgeMin) && newestAgeMin >= 0 && newestAgeMin <= cfg.freshnessMin;
+  // Отрицательный возраст = файл дописан после того, как взяли текущее время
+  // (часы регистратора спешат). Это «пишется сейчас», а не «устарело».
+  const newestAgeMin = Math.max(0, Number(newest.ageMin));
+  const fresh = Number.isFinite(newestAgeMin) && newestAgeMin <= cfg.freshnessMin;
   const ageLabel = newestAgeMin < 60
     ? `${newestAgeMin.toFixed(0)} мин`
     : `${(newestAgeMin / 60).toFixed(1)} ч`;
