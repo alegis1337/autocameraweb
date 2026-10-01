@@ -1,6 +1,6 @@
 {
   "name": "autocamera",
-  "version": "3.5.0",
+  "version": "3.10.0",
   "private": true,
   "license": "UNLICENSED",
   "description": "Детерминированный мониторинг камер видеонаблюдения: Hikvision/HiWatch ISAPI, RTSP, SMB, TRASSIR SDK; статистика неисправностей и контроль качества изображения; Playwright — только для личного кабинета оператора связи",
@@ -10,7 +10,7 @@
     "dry-run": "node src/index.js --dry-run",
     "test-email": "node src/index.js --test-email",
     "test-cam": "node src/index.js --dry-run --only",
-    "test": "node --test",
+    "test": "node --test \"test/*.test.js\"",
     "web": "node --disable-warning=ExperimentalWarning server/app.js",
     "add-user": "node --disable-warning=ExperimentalWarning server/add-user.js",
     "build-points": "node tools/build-points.js",

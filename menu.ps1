@@ -4,7 +4,7 @@
 # уезжало в репозиторий. Fallback на текущую папку — для случая, когда
 # $PSScriptRoot пуст (запуск построчной вставкой в консоль).
 $ProjectDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-$Version    = "v3.5"
+$Version    = "v3.10"
 Set-Location $ProjectDir
 
 # UTF-8 для вывода node-скриптов (имена систем в systems.json — кириллица).
@@ -146,7 +146,7 @@ function Show-Menu {
     }
 
     Write-Host ""
-    $title = "  |        AutoCamera Monitor  $Version          |"
+    $title = "  |        AutoCamera Monitor  $Version         |"
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
     Write-Host $title -ForegroundColor Cyan
     Write-Host "  +------------------------------------------+" -ForegroundColor Cyan
