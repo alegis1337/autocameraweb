@@ -12,18 +12,15 @@
       <h1>Мониторинг видеонаблюдения</h1>
       <p class="sub">Состояние камер по объектам</p>
       <label for="username">Логин</label>
-      <input id="username" name="username" autocomplete="username" autofocus required>
+      <input id="username" name="username" autocomplete="username" maxlength="64" autofocus required>
       <label for="password">Пароль</label>
       <input id="password" name="password" type="password" autocomplete="current-password" required>
       <button type="submit">Войти</button>
-      <div class="login-error" id="err" style="display:none">Неверный логин или пароль</div>
+      <div class="login-error" id="err" hidden>Неверный логин или пароль</div>
+      <div class="login-error" id="err-limit" hidden>Слишком много неудачных попыток — вход закрыт на 15 минут</div>
     </form>
   </div>
-  <script>
-    // При ошибке входа сервер редиректит на /login?e=1 — показываем сообщение.
-    if (new URLSearchParams(location.search).has('e')) {
-      document.getElementById('err').style.display = 'block';
-    }
-  </script>
+  <!-- Скрипт вынесен в файл: inline-скрипты запрещены Content-Security-Policy. -->
+  <script src="/login.js"></script>
 </body>
 </html>

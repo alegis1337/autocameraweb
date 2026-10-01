@@ -35,6 +35,18 @@ export const config = {
     port: num(process.env.WEB_PORT, 8080),
     sessionTtlHours: num(process.env.WEB_SESSION_TTL_HOURS, 12),
     secureCookie: String(process.env.WEB_SECURE_COOKIE || '').toLowerCase() === 'true',
+    // Режим Content-Security-Policy: report (по умолчанию) | enforce | off —
+    // см. server/security.js → cspHeader.
+    csp: ['report', 'enforce', 'off'].includes(String(process.env.WEB_CSP || '').toLowerCase())
+      ? String(process.env.WEB_CSP).toLowerCase() : 'report',
+    // Обратный прокси перед сервером (адреса через запятую): только от них
+    // читаем X-Forwarded-For. Публичные адреса сайта (origin с портом) — для
+    // проверки Origin у POST: за прокси Host на сервере не совпадает с тем,
+    // что видит браузер. Пусто — прокси нет, всё как раньше.
+    trustedProxies: new Set(parseList(process.env.WEB_TRUSTED_PROXIES)),
+    publicOrigins: parseList(process.env.WEB_PUBLIC_ORIGINS)
+      .map((s) => { try { return new URL(s).origin.toLowerCase(); } catch { return ''; } })
+      .filter(Boolean),
   },
 
   // Данные старше этого — «устарели»: light-прогон ходит раз в 15 минут,
@@ -72,4 +84,8 @@ export const config = {
   // как «нет данных». Здесь мы её просто не показываем; чинить сам источник
   // (src/index.js, src/timeline.js) — отдельная задача вне веба.
   hideCameras: new Set(parseList(process.env.WEB_HIDE_CAMERAS)),
+
+  // ffmpeg — тот же, что у прогонов (FFMPEG_PATH): вебу он нужен, чтобы
+  // уменьшать фотографии устройств (v3.9). Пусто — берём из PATH.
+  ffmpegPath: (process.env.FFMPEG_PATH || '').trim(),
 };

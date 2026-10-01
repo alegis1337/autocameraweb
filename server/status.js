@@ -16,6 +16,8 @@ import { detectSystemOutages, isBrokenKind } from '../src/detector.js';
 import { loadSystems } from '../src/config-loader.js';
 import { readCameraPoints } from './camera-points.js';
 import { readSystemPoints } from './system-points.js';
+import { readDevices } from './map-devices.js';
+import { scrubSensitive } from './security.js';
 import { config } from './config.js';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -94,9 +96,18 @@ function systemStatus(cams, isDown) {
 
 const EMPTY = {
   generated_at: null, last_run: null, data_age_sec: null, stale: true,
-  systems: [], cameras: [],
+  systems: [], cameras: [], devices: [],
   totals: { systems: 0, cameras: 0, broken: 0 },
 };
+
+/**
+ * id объектов, известных конфигу. Нужен, чтобы проверить привязку устройства
+ * к объекту при сохранении. null — конфиг не прочитался, тогда проверку
+ * пропускаем: из-за неё нельзя терять возможность поставить отметку на карте.
+ */
+export function knownSystemIds() {
+  try { return new Set(loadSystems().map((s) => s.id)); } catch { return null; }
+}
 
 /**
  * Снимок состояния для карты: объекты со сводным статусом, камеры со статусами и
@@ -178,7 +189,9 @@ export function buildStatus() {
         status: camStatus(c),
         floor: floorOf(c.cam_key),
         since: c.status_since,
-        reason: c.last_reason || '',
+        // Причину чистим от IP/путей/URL: чекер пишет её для инженера в письме,
+        // а карта не должна становиться картой сети заказчика.
+        reason: scrubSensitive(c.last_reason),
         last_seen: c.last_seen,
         has_snapshot: !!findSnapshot(c.system_id, c.name, c.idx, snapDirs),
         ...(geo && Number.isFinite(geo.lat) && Number.isFinite(geo.lon)
@@ -186,6 +199,12 @@ export function buildStatus() {
           : {}),
       };
     });
+
+    // Устройства (не камеры) — из state/map-devices.json, их ставит админ на
+    // карте. Отдаём только те, что относятся к видимым объектам: граница
+    // группы должна работать для них так же, как для камер. Устройство без
+    // объекта показываем всегда — его не к чему отнести.
+    const outDevices = readDevices().filter((d) => !d.system_id || sysIds.has(d.system_id));
 
     const lastRun = snap.lastRun || getMeta(db, 'last_run');
     const ageSec = lastRun ? Math.max(0, Math.round((now - Date.parse(lastRun)) / 1000)) : null;
@@ -197,6 +216,7 @@ export function buildStatus() {
       stale: ageSec === null || ageSec > config.staleAfterSec,
       systems: outSystems,
       cameras: outCameras,
+      devices: outDevices,
       totals: {
         systems: outSystems.length,
         cameras: outCameras.length,
@@ -232,14 +252,14 @@ export function buildCameraDetail(camKey, { days = 30 } = {}) {
       system: sys ? sys.name : cam.system_id,
       status: camStatus(cam),
       since: cam.status_since,
-      reason: cam.last_reason || '',
+      reason: scrubSensitive(cam.last_reason),
       has_snapshot: !!findSnapshot(cam.system_id, cam.name, cam.idx),
       days,
       events: events.reverse().slice(0, 200).map((e) => ({
         ts: e.ts,
         kind: e.kind,
         downtime_sec: e.downtime_sec,
-        reason: e.reason || '',
+        reason: scrubSensitive(e.reason),
       })),
     };
   } finally {

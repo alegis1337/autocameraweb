@@ -20,6 +20,9 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* iOS в альбомной ориентации иначе сам раздувает шрифт. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   /* Страница целиком занимает окно и сама НЕ прокручивается: прокрутка есть
      только внутри списка камер. Без этого любой элемент, вылезший за окно
      (например карта, не успевшая пересчитать свой размер), давал второй
@@ -32,23 +35,47 @@ html, body {
 
 #app { display: flex; flex-direction: column; height: 100%; }
 
-/* ── Шапка ── */
+/* Атрибут hidden должен побеждать: у .objbar и .edit-hint задан display: flex,
+   а он перекрывает display: none из стилей браузера — элемент оставался бы
+   на экране. */
+[hidden] { display: none !important; }
+
+/* ── Шапка ──
+   Две колонки: слева содержимое, которое переносится по строкам, справа
+   закреплённый угол с «Обновлено» и «Выйти». В общем ряду они уезжали на
+   вторую строку, стоило добавить слева ещё одну кнопку; в своей колонке
+   с align-items: start они остаются в правом верхнем углу всегда. */
 .topbar {
   /* Выпадающий список этажей уходит из шапки вниз, поверх карты. Своя ступень
      z-index нужна обоим: у Яндекс-карты внутри свои слои с большими номерами,
      и без этого список оказался бы под картой. */
   position: relative;
   z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 18px;
   padding: 10px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+.topbar-main {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 10px 18px;
+  min-width: 0;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+  /* Ровняем по первой строке левой колонки: обе колонки прижаты вверх, а
+     кнопка «Выйти» выше строки текста. */
+  min-height: 28px;
 }
 .topbar .title { font-weight: 600; font-size: 15px; white-space: nowrap; }
-.topbar .spacer { flex: 1; }
 .stats { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); }
 .stats b { color: var(--text); }
 .updated { color: var(--muted); font-size: 13px; white-space: nowrap; }
@@ -99,6 +126,9 @@ html, body {
    шести кнопок. В шапке они помещаются, а на узком экране переносятся вместе
    с остальным её содержимым (у .topbar включён flex-wrap). */
 .objbar { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Обёртка ленты фильтров нужна только телефону. На широком экране её как бы
+   нет: кнопки остаются flex-элементами шапки, раскладка прежняя. */
+.filters { display: contents; }
 .obj-btn {
   background: var(--panel-2);
   color: var(--muted);
@@ -111,6 +141,10 @@ html, body {
 }
 .obj-btn:hover { background: var(--line); color: var(--text); }
 .obj-btn.active { background: #2b5d86; border-color: #2b5d86; color: #fff; }
+/* «Все объекты» в положении «камеры скрыты»: пунктирная рамка и приглушённый
+   текст — выключатель, а не ещё один невыбранный объект. */
+.obj-btn.off { border-style: dashed; border-color: var(--muted); color: var(--muted); }
+.obj-btn.off:hover { color: var(--text); }
 .obj-btn .obj-count { color: inherit; opacity: .65; margin-left: 5px; }
 .obj-btn .caret { margin-left: 6px; font-size: 10px; opacity: .8; }
 /* Выбранный этаж пишем на самой кнопке: список закрыт, а фильтр продолжает
@@ -152,14 +186,121 @@ html, body {
 .floor-item.active { background: #2b5d86; color: #fff; }
 .floor-item .obj-count { color: inherit; opacity: .65; margin-left: 5px; }
 
-/* РЕДАКТОР: подсказка под шапкой при включённом режиме */
+/* РЕДАКТОР: зелёная полоса режима — теперь ВНУТРИ шапки, а не отдельной
+   строкой под ней: своя строка съедала высоту у карты. Здесь же кнопки
+   постановки устройств, поэтому полоса выкладывается флексом.
+   `flex: 1 1 100%` — полоса всегда занимает свою строку внутри левой колонки,
+   ту самую, что освободили «Обновлено» и «Выйти». */
 .edit-hint {
-  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1 1 100%;
+  min-width: 0;
+  padding: 5px 10px;
   background: #23331f;
-  border-bottom: 1px solid var(--line);
+  border: 1px solid #34502c;
+  border-radius: 8px;
   color: #cfe6c2;
   font-size: 13px;
 }
+/* Подсказка ужимается первой и обрезается многоточием: кнопки типов важнее
+   текста, и без этого полоса на узком экране разъезжалась на две строки.
+   С восемью типами (v3.10) на 1280 ей остаётся ~150 px — полный текст
+   виден при наведении (title ставит setHint). */
+#edit-msg {
+  flex: 1 1 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Устройства на карте (не камеры) ──
+   Тип показывает фигура значка, цветов два: голубой у сетевого железа,
+   сиреневый у компьютеров и принтеров. Цвет приходит из app.js переменной
+   --dev-color (deviceColor), здесь только запасной голубой.
+   Кнопка слоя стоит в шапке рядом с объектами — это такой же фильтр. */
+.dev-toggle { color: var(--muted); }
+.dev-toggle.active { background: #1f4d63; border-color: #1f4d63; color: #fff; }
+
+.dev-tools { display: flex; gap: 5px; flex-wrap: wrap; }
+.dev-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 4px 9px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.dev-btn:hover { background: var(--line); }
+/* Выбранный тип: следующий клик по карте поставит именно его. */
+.dev-btn.armed { background: #1f4d63; border-color: var(--dev-color, #5cc8ff); color: #fff; }
+.dev-ico { flex: none; color: var(--dev-color, #5cc8ff); }
+.dev-btn.armed .dev-ico { color: #fff; }
+.sb-devico { display: inline-flex; flex: none; width: 13px; }
+
+/* Карточка устройства в балуне: та же белая подложка Яндекса, что у камеры. */
+.card-dev .dev-form { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.card-dev .dev-form label { display: flex; flex-direction: column; gap: 2px; color: #55606b; font-size: 12px; }
+.card-dev .dev-form input,
+.card-dev .dev-form select {
+  padding: 5px 7px;
+  border: 1px solid #c8d0d8;
+  border-radius: 5px;
+  color: #1b1b1b;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+}
+.card-dev .dev-actions { display: flex; gap: 8px; margin-top: 4px; }
+.card-dev .dev-actions button {
+  flex: 1;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 5px;
+  background: #2f6f4f;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.card-dev .dev-actions .dev-del { background: #cf4038; }
+/* «Добавить фото» — это label вокруг скрытого input[type=file], красим как кнопку. */
+.card-dev .dev-actions .dev-photo-add {
+  flex: 1; padding: 6px 10px; border-radius: 5px; background: #2b5d86; color: #fff;
+  font-size: 13px; text-align: center; cursor: pointer;
+}
+
+/* ── Фото устройств (v3.9) ──
+   Миниатюры в балуне; по клику — лайтбокс на весь экран. Балун Яндекса
+   светлый, поэтому цвета здесь свои, не из тёмной темы шапки. */
+.card .card-photos { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+.card .card-photo-wrap { position: relative; }
+.card .card-photo {
+  width: 96px; height: 72px; object-fit: cover; border-radius: 5px; display: block;
+  cursor: zoom-in; background: #eef1f4;
+}
+.card .card-photo-del {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px;
+  border: none; border-radius: 50%; background: #cf4038; color: #fff;
+  font: inherit; font-size: 14px; line-height: 20px; cursor: pointer; padding: 0;
+}
+#lightbox {
+  position: fixed; inset: 0; z-index: 1000; background: rgba(8, 12, 16, .92);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; cursor: zoom-out;
+}
+#lightbox img { max-width: 96vw; max-height: 86vh; border-radius: 6px; box-shadow: 0 8px 40px rgba(0, 0, 0, .6); }
+#lightbox .lb-title { color: var(--text); font-size: 15px; }
+#lightbox .lb-hint { color: var(--muted); font-size: 12px; }
 
 /* ── Основная область: карта + список ── */
 .content { display: flex; flex: 1; min-height: 0; }
@@ -245,7 +386,7 @@ html, body {
 .badge.no-recording { background: #b8860b; }
 .badge.offline { background: #cf4038; }
 .badge.unknown { background: #7a8794; }
-.card .card-shot { width: 100%; border-radius: 6px; display: block; margin-top: 6px; }
+.card .card-shot { width: 100%; border-radius: 6px; display: block; margin-top: 6px; cursor: zoom-in; }
 .card .card-noshot { color: #55606b; font-size: 12px; padding: 16px; text-align: center; background: #eef1f4; border-radius: 6px; margin-top: 6px; }
 
 /* ── Страница входа ── */
@@ -283,11 +424,146 @@ html, body {
 .login-card button:hover { background: #37835d; }
 .login-error { margin-top: 12px; color: var(--down); font-size: 13px; text-align: center; }
 
-/* ── Узкие экраны: телефон в пределах сети предприятия ── */
+/* Вкладки «Карта / Список» есть только на телефоне. */
+.mob-tabs { display: none; }
+
+/* ── Планшет: карта сверху, список под ней ── */
 @media (max-width: 900px) {
   .content { flex-direction: column; }
   /* Высота задана явно: карте нужен определённый размер родителя. */
   #map { flex: none; height: 55vh; }
   #sidebar { width: auto; border-left: none; border-top: 1px solid var(--line); flex: 1; min-height: 0; }
   .stats { font-size: 13px; gap: 10px; }
+}
+
+/* ── Телефон (v3.10) ──
+   Узкий экран или низкий (телефон боком). Условие то же, что PHONE_MQ в
+   app.js — менять оба места вместе.
+   Главное — отдать экран карте: шапка в три строки, кнопки объектов одной
+   лентой с прокруткой пальцем (в столбик они съедали полэкрана), список камер
+   не под картой, а отдельной вкладкой поверх неё. Карта под списком остаётся
+   своего размера — Яндексу не приходится пересчитывать контейнер при каждом
+   переключении. */
+@media (max-width: 760px), (max-height: 500px) {
+  /* Обёртки шапки «растворяются», и её части раскладываются по строкам сетки:
+     название и «Выйти», счётчики и время обновления, лента фильтров,
+     полоса редактора. */
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title   logout"
+      "stats   updated"
+      "filters filters"
+      "hint    hint";
+    align-items: center;
+    gap: 6px 10px;
+    padding: 8px 12px;
+  }
+  .topbar-main, .topbar-right { display: contents; }
+  .topbar .title { grid-area: title; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .topbar-right form { grid-area: logout; }
+  .logout { padding: 4px 10px; font-size: 13px; }
+  .stats { grid-area: stats; gap: 2px 12px; font-size: 13px; }
+  .updated { grid-area: updated; justify-self: end; font-size: 12px; }
+  /* «Обновлено:» очевидно из места — оставляем только «5 мин назад».
+     «Данные устарели» не прячем: это предупреждение. */
+  .updated .upd-label { display: none; }
+
+  /* Лента фильтров уходит под края экрана (отрицательные поля), чтобы при
+     прокрутке кнопки не обрезались на полпути от края. */
+  .filters {
+    grid-area: filters;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 -12px;
+    padding: 0 12px 2px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .filters::-webkit-scrollbar { display: none; }
+  .objbar { flex: none; flex-wrap: nowrap; }
+  .filters > *, .objbar > * { flex: none; }
+  /* Палец толще курсора — кнопки выше. */
+  .obj-btn, .edit-btn { padding: 6px 12px; }
+  /* Лента прокручивается и обрезала бы выпадающий список этажей, поэтому
+     здесь он fixed; координаты под кнопкой ставит app.js (placeFloorMenu). */
+  .obj-menu { position: fixed; top: auto; left: auto; min-width: 0; }
+  .floor-item { padding: 9px 12px; }
+
+  .edit-hint { grid-area: hint; gap: 6px; padding: 6px 8px; }
+  #edit-msg { flex: 1 1 100%; }
+  .dev-tools {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .dev-tools::-webkit-scrollbar { display: none; }
+  .dev-btn { flex: none; padding: 6px 11px; }
+
+  /* Карта — во всё место между шапкой и вкладками, список — поверх неё. */
+  .content { position: relative; }
+  #map { flex: 1; height: auto; }
+  #sidebar {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    width: auto;
+    border: 0;
+    display: none;
+  }
+  body[data-view="list"] #sidebar { display: flex; }
+  .sb-row { padding: 11px 14px; }
+
+  .mob-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .mob-tabs button {
+    flex: 1;
+    padding: 9px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--muted);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .mob-tabs button.active { background: #2b5d86; border-color: #2b5d86; color: #fff; }
+  .mob-tabs #mob-count { font-weight: 400; opacity: .75; }
+
+  /* Карточка на телефоне открывается панелью внизу карты во всю ширину —
+     ограничение ширины балуна ей только мешает. */
+  .card { min-width: 0; max-width: none; }
+  .card .card-shot { max-height: 40vh; object-fit: contain; background: #eef1f4; }
+  /* Шрифт полей не меньше 16 px: иначе iPhone при касании поля увеличивает
+     страницу и обратно сам не уменьшает. */
+  .card-dev .dev-form input,
+  .card-dev .dev-form select,
+  .login-card input { font-size: 16px; }
+  .card-dev .dev-actions button,
+  .card-dev .dev-actions .dev-photo-add { padding: 9px 10px; }
+  .card .card-photo-del { width: 26px; height: 26px; line-height: 26px; top: -8px; right: -8px; }
+}
+
+/* Телефон боком: ширины хватает, а высоты нет — название, счётчики, время и
+   «Выйти» встают в одну строку, вкладки тоньше. Иначе карте оставалось
+   меньше половины экрана. */
+@media (max-height: 500px) and (min-width: 561px) {
+  .topbar {
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "title   stats   updated logout"
+      "filters filters filters filters"
+      "hint    hint    hint    hint";
+    padding: 6px 12px;
+  }
+  .mob-tabs { padding: 4px 12px; }
+  .mob-tabs button { padding: 5px; }
 }

@@ -6,31 +6,53 @@
   <title>Мониторинг видеонаблюдения — карта</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-view="map">
   <div id="app">
+    <!-- Шапка — две колонки: слева всё, что переносится по строкам, справа
+         закреплённый угол. «Обновлено» и «Выйти» из потока вынуты намеренно:
+         в общем ряду они уезжали вниз, как только слева добавлялась кнопка. -->
     <div class="topbar">
-      <span class="title">Мониторинг видеонаблюдения</span>
-      <div class="stats">
-        <span><span class="dot ok"></span>Работают: <b id="cnt-ok">—</b></span>
-        <span><span class="dot down"></span>Не работают: <b id="cnt-down">—</b></span>
-        <span><span class="dot unknown"></span>Нет данных: <b id="cnt-unknown">—</b></span>
+      <div class="topbar-main">
+        <span class="title">Мониторинг видеонаблюдения</span>
+        <!-- «Нет данных» из шапки убрано: серые точки видно на карте и в
+             списке, а отдельный счётчик к действию не звал. -->
+        <div class="stats">
+          <span><span class="dot ok"></span>Работают: <b id="cnt-ok">—</b></span>
+          <span><span class="dot down"></span>Не работают: <b id="cnt-down">—</b></span>
+        </div>
+        <!-- Фильтр по объектам: кнопки строит app.js по данным /api/status,
+             порядок — как в WEB_MAP_SYSTEMS. -->
+        <!-- Этажи (список камер второго этажа — WEB_FLOOR2_CAMERAS) — выпадающим списком
+             под кнопкой объекта: список висит поверх карты и высоту шапки не
+             меняет, поэтому интерфейс не «прыгает». -->
+        <!-- .filters на широком экране не рисуется вовсе (display: contents —
+             кнопки лежат в шапке как раньше), а на телефоне это одна лента,
+             которую листают пальцем: кнопки в столбик съедали полэкрана. -->
+        <div class="filters" id="filters">
+          <div class="objbar" id="objects" role="group" aria-label="Объект" hidden></div>
+          <!-- Слой устройств (хабы, регистраторы, коммутаторы…): их ставит админ,
+               мониторинг их не опрашивает. Слой можно выключить, чтобы не мешал. -->
+          <button type="button" id="dev-toggle" class="obj-btn dev-toggle" hidden></button>
+          <!-- ВРЕМЕННЫЙ РЕДАКТОР: кнопка видна только админу (показывает app.js) -->
+          <button type="button" id="edit-toggle" class="edit-btn" hidden>Режим редактора</button>
+        </div>
+
+        <!-- Зелёная полоса режима редактора: подсказка и кнопки постановки
+             устройств. Живёт ВНУТРИ шапки, на месте, освободившемся от
+             «Обновлено»/«Выйти» — отдельной строкой под шапкой она съедала
+             высоту у карты. Это ПОСТОЯННАЯ часть (см. app.js, пометки
+             «УСТРОЙСТВА»), временный редактор камер уберут отдельно. -->
+        <div class="edit-hint" id="edit-hint" hidden>
+          <span id="edit-msg"></span>
+          <span class="dev-tools" id="dev-tools"></span>
+        </div>
       </div>
-      <!-- Фильтр по объектам: кнопки строит app.js по данным /api/status,
-           порядок — как в WEB_MAP_SYSTEMS. -->
-      <!-- Этажи (список камер второго этажа — WEB_FLOOR2_CAMERAS) — выпадающим списком
-           под кнопкой объекта: список висит поверх карты и высоту шапки не
-           меняет, поэтому интерфейс не «прыгает». -->
-      <div class="objbar" id="objects" role="group" aria-label="Объект" hidden></div>
 
-      <span class="spacer"></span>
-      <!-- ВРЕМЕННЫЙ РЕДАКТОР: кнопка видна только админу (показывает app.js) -->
-      <button type="button" id="edit-toggle" class="edit-btn" hidden>Режим редактора</button>
-      <span class="updated" id="updated">загрузка…</span>
-      <form method="post" action="/logout"><button class="logout" type="submit">Выйти</button></form>
+      <div class="topbar-right">
+        <span class="updated" id="updated">загрузка…</span>
+        <form method="post" action="/logout"><button class="logout" type="submit">Выйти</button></form>
+      </div>
     </div>
-
-    <!-- ВРЕМЕННЫЙ РЕДАКТОР: подсказка при включённом режиме -->
-    <div class="edit-hint" id="edit-hint" hidden></div>
 
     <div class="content">
       <div id="map"></div>
@@ -39,6 +61,22 @@
         <div class="sb-list" id="sb-list"></div>
       </aside>
     </div>
+
+    <!-- Телефон: карта и список не помещаются рядом, поэтому это две вкладки.
+         На широком экране панели нет (см. styles.css, блок «Телефон»). -->
+    <nav class="mob-tabs" id="mob-tabs" aria-label="Вид">
+      <button type="button" data-view="map" class="active">Карта</button>
+      <button type="button" data-view="list">Список <span id="mob-count"></span></button>
+    </nav>
+  </div>
+
+  <!-- Лайтбокс для фото устройств (v3.9) и снимков камер (v3.10): клик по
+       картинке в балуне разворачивает её на весь экран; клик мимо или Esc
+       закрывает. -->
+  <div id="lightbox" hidden>
+    <div class="lb-title"></div>
+    <img alt="Снимок во весь экран">
+    <div class="lb-hint">нажмите в любом месте, чтобы закрыть</div>
   </div>
 
   <!-- Публичный конфиг (ключ Yandex, центр/зум, объект) сервер инжектит сюда -->
